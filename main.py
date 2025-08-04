@@ -4,17 +4,18 @@
 - API для просмотра логов
 - Статика для UI логов
 """
-import os, logging, uuid, json, asyncio, io
+import os, logging, uuid, json, asyncio, io, shutil, subprocess, time
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, status, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from Agent import Agent
 from log_storage import insert_log, query_logs, to_csv, delete_all_logs
+from create_embeddings import recreate_embeddings
 
 # --- Инициализация ---
 
@@ -86,7 +87,6 @@ async def clear_logs():
 async def get_logs_csv():
     rows = await query_logs({})
     csv_data_str = await to_csv(rows)
-    # Кодируем в utf-8-sig, чтобы Excel правильно распознавал кириллицу (добавляется BOM)
     response_bytes = csv_data_str.encode('utf-8-sig')
     return StreamingResponse(
         io.BytesIO(response_bytes),
@@ -96,9 +96,6 @@ async def get_logs_csv():
 
 @app.get("/kb")
 async def get_knowledge_base():
-    """
-    Отдает содержимое файла базы знаний.
-    """
     kb_path = "Метротест_САЙТ.txt"
     try:
         with open(kb_path, 'r', encoding='utf-8') as f:
@@ -109,13 +106,55 @@ async def get_knowledge_base():
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@app.post("/kb/upload")
+async def upload_kb(file: UploadFile = File(...)):
+    if not file.filename.endswith('.txt'):
+        return JSONResponse(status_code=400, content={"message": "Ошибка: Пожалуйста, загрузите .txt файл."})
+
+    try:
+        kb_path = "Метротест_САЙТ.txt"
+        
+        # 1. Бэкап
+        backup_dir = "kb_backups"
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        backup_path = os.path.join(backup_dir, f"Метротест_САЙТ_{timestamp}.txt.bak")
+        shutil.copy(kb_path, backup_path)
+        logger.info(f"💾 Создан бэкап базы знаний: {backup_path}")
+
+        # 2. Сохраняем новый файл
+        with open(kb_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        logger.info(f"✅ Новый файл базы знаний '{file.filename}' сохранен.")
+
+        # 3. Асинхронно запускаем пересоздание эмбеддингов
+        asyncio.create_task(recreate_embeddings_and_reload_agent())
+        
+        return JSONResponse(status_code=202, content={"message": "Файл принят. Начался процесс обновления базы знаний. Это может занять несколько минут."})
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при загрузке файла БЗ: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"message": f"Внутренняя ошибка сервера: {e}"})
+
+async def recreate_embeddings_and_reload_agent():
+    logger.info("⏳ Начинаем пересоздание эмбеддингов в фоновом режиме...")
+    loop = asyncio.get_event_loop()
+    try:
+        # Запускаем синхронную функцию в отдельном потоке, чтобы не блокировать event loop
+        await loop.run_in_executor(None, recreate_embeddings)
+        logger.info("✅ Эмбеддинги успешно пересозданы.")
+        
+        # Перезагружаем агента
+        if agent and hasattr(agent, 'reload'):
+            agent.reload()
+            
+    except Exception as e:
+        logger.error(f"❌ Исключение при пересоздании эмбеддингов: {e}", exc_info=True)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, callerId: str = Query(None)):
-    """
-    Основной обработчик WebSocket-соединений от Voximplant.
-    - Управляет жизненным циклом звонка.
-    - Сохраняет лог после завершения звонка.
-    """
     await websocket.accept()
     session_id = str(uuid.uuid4())
     start_time = datetime.now(timezone.utc)

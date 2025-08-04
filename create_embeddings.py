@@ -1,68 +1,59 @@
-# create_embeddings.py
 import os
+import logging
 from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения (должен быть OPENAI_API_KEY,
-# а также HTTP_PROXY и HTTPS_PROXY, если они нужны)
-print("Загрузка переменных окружения из .env файла...")
-load_dotenv()
-print("Переменные окружения загружены.")
-# Библиотеки openai и httpx автоматически используют переменные HTTP_PROXY и HTTPS_PROXY,
-# если они установлены в окружении. Ручная настройка клиента не требуется.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Конфигурация ---
-# 1. Путь к файлу с базой знаний
-script_dir = os.path.dirname(os.path.abspath(__file__))
-SOURCE_DOCUMENT_PATH = os.path.join(script_dir, "Метротест_САЙТ.txt")
-# 2. Название папки, куда будут сохранены эмбеддинги
-PERSIST_DIRECTORY = os.path.join(script_dir, "chroma_db_metrotech")
-# 3. Размер одного чанка (в символах)
-CHUNK_SIZE = 1000
-# 4. Перекрытие между чанками (чтобы не терять контекст на стыках)
-CHUNK_OVERLAP = 200
-
-def main():
+def recreate_embeddings():
     """
     Основная функция для создания и сохранения векторной базы данных.
     """
-    print("--- Начало процесса создания эмбеддингов ---")
+    load_dotenv()
+    logging.info("--- Начало процесса создания эмбеддингов ---")
 
-    # 1. Загрузка документа
-    print(f"1/4: Загрузка документа из '{SOURCE_DOCUMENT_PATH}'...")
-    if not os.path.exists(SOURCE_DOCUMENT_PATH):
-        print(f"Ошибка: Файл '{SOURCE_DOCUMENT_PATH}' не найден.")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    source_document_path = os.path.join(script_dir, "Метротест_САЙТ.txt")
+    persist_directory = os.path.join(script_dir, "chroma_db_metrotech")
+    chunk_size = 1000
+    chunk_overlap = 200
+
+    logging.info(f"1/4: Загрузка документа из '{source_document_path}'...")
+    if not os.path.exists(source_document_path):
+        logging.error(f"Файл '{source_document_path}' не найден.")
         return
-        
-    loader = TextLoader(SOURCE_DOCUMENT_PATH, encoding='utf-8')
+
+    loader = TextLoader(source_document_path, encoding='utf-8')
     documents = loader.load()
-    print(f"Документ успешно загружен. Количество страниц: {len(documents)}")
+    logging.info(f"Документ успешно загружен. Количество страниц: {len(documents)}")
 
-    # 2. Разделение текста на чанки
-    print(f"2/4: Разделение текста на чанки (размер: {CHUNK_SIZE}, перекрытие: {CHUNK_OVERLAP})...")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+    logging.info(f"2/4: Разделение текста на чанки (размер: {chunk_size}, перекрытие: {chunk_overlap})...")
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     texts = text_splitter.split_documents(documents)
-    print(f"Текст разделен на {len(texts)} чанков.")
+    logging.info(f"Текст разделен на {len(texts)} чанков.")
 
-    # 3. Инициализация модели для создания эмбеддингов
-    print("3/4: Инициализация модели эмбеддингов OpenAI...")
-    # Ручная передача http_client не нужна, библиотека подхватит прокси из окружения
+    logging.info("3/4: Инициализация модели эмбеддингов OpenAI...")
     embeddings = OpenAIEmbeddings(chunk_size=1000)
-    print("Модель инициализирована.")
+    logging.info("Модель инициализирована.")
 
-    # 4. Создание и сохранение векторной базы данных
-    print(f"4/4: Создание и сохранение векторной базы в папку '{PERSIST_DIRECTORY}'...")
+    logging.info(f"4/4: Создание и сохранение векторной базы в папку '{persist_directory}'...")
     db = Chroma.from_documents(
-        texts, 
-        embeddings, 
-        persist_directory=PERSIST_DIRECTORY
+        texts,
+        embeddings,
+        persist_directory=persist_directory
     )
-    print("--- Процесс успешно завершен! ---")
-    print(f"Ваша база знаний готова для использования в папке '{PERSIST_DIRECTORY}'.")
+    logging.info("--- Процесс успешно завершен! ---")
+    logging.info(f"Ваша база знаний готова для использования в папке '{persist_directory}'.")
+    return True
 
+def main_cli():
+    """
+    Функция для запуска из командной строки.
+    """
+    recreate_embeddings()
 
 if __name__ == "__main__":
-    main()
+    main_cli()

@@ -106,11 +106,11 @@ const EmptyIcon = () => React.createElement("svg", {
 }));
 
 // Components
-const StatsCard = ({ number, label, color = "var(--primary)" }) => 
+const StatsCard = ({ number, label, color = "var(--primary)" }) =>
   React.createElement("div", { className: "stat-card" },
-    React.createElement("div", { 
-      className: "stat-number", 
-      style: { color } 
+    React.createElement("div", {
+      className: "stat-number",
+      style: { color }
     }, number),
     React.createElement("div", { className: "stat-label" }, label)
   );
@@ -139,15 +139,15 @@ const LogTable = ({ logs, onRowClick }) => {
             key: log.id,
             onClick: () => onRowClick(log)
           },
-            React.createElement("td", null, 
+            React.createElement("td", null,
               React.createElement("code", null, log.id.slice(0, 8) + "...")
             ),
             React.createElement("td", null, log.callerId || "—"),
             React.createElement("td", null, formatDate(log.startTime)),
             React.createElement("td", null, formatDuration(log.startTime, log.endTime)),
             React.createElement("td", null,
-              React.createElement("span", { 
-                className: `status ${log.status}` 
+              React.createElement("span", {
+                className: `status ${log.status}`
               }, log.status)
             )
           )
@@ -167,26 +167,26 @@ const Modal = ({ log, onClose }) => {
     transcript = [{ speaker: 'system', text: 'Ошибка в формате диалога' }];
   }
 
-  return React.createElement("div", { 
-    className: "modal show", 
-    onClick: onClose 
+  return React.createElement("div", {
+    className: "modal show",
+    onClick: onClose
   },
-    React.createElement("div", { 
-      className: "modal-content", 
-      onClick: (e) => e.stopPropagation() 
+    React.createElement("div", {
+      className: "modal-content",
+      onClick: (e) => e.stopPropagation()
     },
       React.createElement("div", { className: "modal-header" },
         React.createElement("h3", null, `Детали звонка`),
-        React.createElement("button", { 
-          className: "close-btn", 
-          onClick: onClose 
+        React.createElement("button", {
+          className: "close-btn",
+          onClick: onClose
         }, React.createElement(CloseIcon))
       ),
       React.createElement("div", { className: "modal-body" },
         React.createElement("div", { className: "info-grid" },
           React.createElement("div", { className: "info-item" },
             React.createElement("div", { className: "info-label" }, "ID звонка"),
-            React.createElement("div", { className: "info-value" }, 
+            React.createElement("div", { className: "info-value" },
               React.createElement("code", null, log.id)
             )
           ),
@@ -209,8 +209,8 @@ const Modal = ({ log, onClose }) => {
           React.createElement("div", { className: "info-item" },
             React.createElement("div", { className: "info-label" }, "Статус"),
             React.createElement("div", { className: "info-value" },
-              React.createElement("span", { 
-                className: `status ${log.status}` 
+              React.createElement("span", {
+                className: `status ${log.status}`
               }, log.status)
             )
           )
@@ -218,9 +218,9 @@ const Modal = ({ log, onClose }) => {
         React.createElement("div", { className: "transcript" },
           React.createElement("h4", null, "Транскрипт разговора"),
           transcript.map((turn, index) =>
-            React.createElement("div", { 
-              key: index, 
-              className: `turn ${turn.speaker}` 
+            React.createElement("div", {
+              key: index,
+              className: `turn ${turn.speaker}`
             }, turn.text)
           )
         )
@@ -232,31 +232,31 @@ const Modal = ({ log, onClose }) => {
 const KnowledgeBaseModal = ({ content, onClose }) => {
   if (!content) return null;
 
-  return React.createElement("div", { 
-    className: "modal show", 
-    onClick: onClose 
+  return React.createElement("div", {
+    className: "modal show",
+    onClick: onClose
   },
-    React.createElement("div", { 
-      className: "modal-content", 
-      onClick: (e) => e.stopPropagation() 
+    React.createElement("div", {
+      className: "modal-content",
+      onClick: (e) => e.stopPropagation()
     },
       React.createElement("div", { className: "modal-header" },
-        React.createElement("h3", null, "База знаний"),
-        React.createElement("button", { 
-          className: "close-btn", 
-          onClick: onClose 
+        React.createElement("h3", null, "Базы знаний"),
+        React.createElement("button", {
+          className: "close-btn",
+          onClick: onClose
         }, React.createElement(CloseIcon))
       ),
       React.createElement("div", { className: "modal-body" },
-        React.createElement("pre", { 
-          style: { 
-            whiteSpace: 'pre-wrap', 
+        React.createElement("pre", {
+          style: {
+            whiteSpace: 'pre-wrap',
             lineHeight: '1.6',
             background: 'var(--bg-primary)',
             padding: '1rem',
             borderRadius: '0.5rem',
             border: '1px solid var(--border)'
-          } 
+          }
         }, content.text || content.error)
       )
     )
@@ -272,33 +272,34 @@ const App = () => {
   const [kbContent, setKbContent] = useState(null);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [uploadStatus, setUploadStatus] = useState('');
 
   const stats = useMemo(() => {
     const total = logs.length;
     const completed = logs.filter(log => log.status === 'Completed').length;
     const failed = logs.filter(log => log.status === 'Failed').length;
     const interrupted = logs.filter(log => log.status === 'Interrupted').length;
-    
+
     return { total, completed, failed, interrupted };
   }, [logs]);
 
   const fetchLogs = async (searchQuery, isInitialLoad = false) => {
     if (isInitialLoad) setLoading(true);
     setError(null);
-    
+
     try {
       const params = new URLSearchParams();
       if (searchQuery) params.append('q', searchQuery);
       if (dateFrom) params.append('date_from', new Date(dateFrom).toISOString());
       if (dateTo) params.append('date_to', new Date(dateTo).toISOString());
-      
+
       const url = `/logs?${params.toString()}`;
       const response = await fetch(url);
-      
+
       if (!response.ok) {
         throw new Error(`Ошибка ${response.status}: ${response.statusText}`);
       }
-      
+
       const data = await response.json();
       setLogs(data);
     } catch (err) {
@@ -333,8 +334,41 @@ const App = () => {
     }
   };
 
+  const handleKbUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    if (!file.name.endsWith('.txt')) {
+        setUploadStatus('Ошибка: Пожалуйста, выберите .txt файл.');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    setUploadStatus('Загрузка файла и обновление базы...');
+    setError(null);
+
+    try {
+        const response = await fetch('/kb/upload', {
+            method: 'POST',
+            body: formData,
+        });
+        const result = await response.json();
+
+        if (response.ok) {
+            setUploadStatus(`Успешно: ${result.message}`);
+        } else {
+            throw new Error(result.message || `Ошибка ${response.status}`);
+        }
+    } catch (err) {
+        setUploadStatus(`Ошибка: ${err.message}`);
+        setError(err.message);
+    }
+  };
+
   const debouncedFetch = useCallback(
-    debounce((searchQuery) => fetchLogs(searchQuery), 300), 
+    debounce((searchQuery) => fetchLogs(searchQuery), 300),
     [dateFrom, dateTo]
   );
 
@@ -348,10 +382,6 @@ const App = () => {
     return () => clearInterval(intervalId);
   }, [query, dateFrom, dateTo]);
 
-  useEffect(() => {
-    debouncedFetch(query);
-  }, [query, debouncedFetch]);
-
   return React.createElement("div", { className: "container" },
     React.createElement("div", { className: "header" },
       React.createElement("h1", null, "Admin Panel"),
@@ -361,23 +391,23 @@ const App = () => {
     ),
 
     React.createElement("div", { className: "stats-grid" },
-        React.createElement(StatsCard, { 
-            number: stats.total, 
+        React.createElement(StatsCard, {
+            number: stats.total,
             label: "Всего звонков",
             color: "var(--primary)"
           }),
-          React.createElement(StatsCard, { 
-            number: stats.completed, 
+          React.createElement(StatsCard, {
+            number: stats.completed,
             label: "Завершенных",
             color: "var(--success)"
           }),
-          React.createElement(StatsCard, { 
-            number: stats.interrupted, 
+          React.createElement(StatsCard, {
+            number: stats.interrupted,
             label: "Прерванных",
             color: "var(--warning)"
           }),
-          React.createElement(StatsCard, { 
-            number: stats.failed, 
+          React.createElement(StatsCard, {
+            number: stats.failed,
             label: "Неудачных",
             color: "var(--danger)"
           })
@@ -409,13 +439,13 @@ const App = () => {
       React.createElement("a", {
         href: "/logs/csv",
         className: "btn btn-success",
-        style: { 
+        style: {
           pointerEvents: !logs.length ? "none" : "auto",
           opacity: !logs.length ? 0.5 : 1
         }
       },
         React.createElement(DownloadIcon),
-        "Экспорт CSV"
+        "Экспорт логов CSV"
       ),
       React.createElement("button", {
         className: "btn btn-primary",
@@ -424,15 +454,30 @@ const App = () => {
         React.createElement(BookIcon),
         "База знаний"
       ),
+      React.createElement("label", { htmlFor: "kb-upload", className: "btn btn-primary" },
+          "Обновить базу знаний",
+          React.createElement("input", {
+              id: "kb-upload",
+              type: "file",
+              accept: ".txt",
+              style: { display: "none" },
+              onChange: handleKbUpload
+          })
+      ),
       React.createElement("button", {
         className: "btn btn-danger",
         onClick: clearAllLogs,
         disabled: !logs.length
       },
         React.createElement(TrashIcon),
-        "Очистить все"
+        "Очистить все логи"
       )
     ),
+
+    uploadStatus && React.createElement("div", {
+        className: uploadStatus.startsWith('Ошибка') ? "error" : "success-message",
+        style: { marginBottom: '1rem', padding: '1rem', borderRadius: '0.75rem', border: '1px solid', borderColor: uploadStatus.startsWith('Ошибка') ? 'var(--danger)' : 'var(--success)', background: uploadStatus.startsWith('Ошибка') ? 'rgb(239 68 68 / 0.1)' : 'rgb(16 185 129 / 0.1)'}
+    }, uploadStatus),
 
     error && React.createElement("div", { className: "error" },
       `⚠️ ${error}`
@@ -440,19 +485,19 @@ const App = () => {
 
     loading ? React.createElement("div", { className: "loading" },
       React.createElement("div", { className: "spinner" })
-    ) : React.createElement(LogTable, { 
-      logs: logs, 
-      onRowClick: setModalLog 
+    ) : React.createElement(LogTable, {
+      logs: logs,
+      onRowClick: setModalLog
     }),
 
-    React.createElement(Modal, { 
-      log: modalLog, 
-      onClose: () => setModalLog(null) 
+    React.createElement(Modal, {
+      log: modalLog,
+      onClose: () => setModalLog(null)
     }),
-    
-    React.createElement(KnowledgeBaseModal, { 
-      content: kbContent, 
-      onClose: () => setKbContent(null) 
+
+    React.createElement(KnowledgeBaseModal, {
+      content: kbContent,
+      onClose: () => setKbContent(null)
     })
   );
 };

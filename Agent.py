@@ -7,10 +7,12 @@ from langchain_community.vectorstores import Chroma
 from dotenv import load_dotenv
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
+import logging
 
 load_dotenv()
 
 PERSIST_DIRECTORY = "chroma_db_metrotech"
+logger = logging.getLogger(__name__)
 
 # Промпт для переформулирования вопроса с учетом истории
 contextualize_q_system_prompt = """Учитывая историю чата и последний вопрос пользователя, который может ссылаться на контекст в истории чата, \
@@ -34,36 +36,34 @@ qa_system_prompt = """
 
 class Agent:
     def __init__(self) -> None:
-        print("--- Инициализация Агента 'Метротест' (улучшенная версия) ---")
+        logger.info("--- Инициализация Агента 'Метротест' ---")
         self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.2, streaming=True)
-        print("Языковая модель инициализирована.")
+        self.store = {}
+        self._initialize_rag_chain()
+        logger.info("--- Агент 'Метротест' успешно инициализирован ---")
 
-        print(f"Подключение к векторной базе в '{PERSIST_DIRECTORY}'...")
+    def _initialize_rag_chain(self):
+        """Инициализирует или перезагружает компоненты RAG."""
+        logger.info("Инициализация или перезагрузка RAG-цепочки...")
+        
+        logger.info(f"Подключение к векторной базе в '{PERSIST_DIRECTORY}'...")
         embeddings = OpenAIEmbeddings(chunk_size=1000)
         self.db = Chroma(persist_directory=PERSIST_DIRECTORY, embedding_function=embeddings)
         self.retriever = self.db.as_retriever(search_type="mmr", search_kwargs={"k": 5})
-        print("Подключение к базе данных успешно.")
+        logger.info("Подключение к базе данных успешно.")
         
-        # 1. Цепочка для переформулирования вопроса с учетом истории
         contextualize_q_prompt = ChatPromptTemplate.from_messages(
             [("system", contextualize_q_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
         history_aware_retriever = create_history_aware_retriever(self.llm, self.retriever, contextualize_q_prompt)
 
-        # 2. Цепочка для генерации финального ответа (без саммаризации)
         qa_prompt = ChatPromptTemplate.from_messages(
             [("system", qa_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
         question_answer_chain = create_stuff_documents_chain(self.llm, qa_prompt)
-
-        # 3. Собираем все вместе с помощью create_retrieval_chain
-        # Эта функция правильно объединяет ретривер и цепочку ответов
+        
         rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
         
-        # 4. Добавляем управление историей диалога
-        self.store = {}
-        # RunnableWithMessageHistory теперь будет работать корректно,
-        # так как create_retrieval_chain возвращает словарь с ключом "answer".
         self.conversational_rag_chain = RunnableWithMessageHistory(
             rag_chain,
             self.get_session_history,
@@ -71,7 +71,18 @@ class Agent:
             history_messages_key="chat_history",
             output_messages_key="answer",
         )
-        print("--- Агент 'Метротест' (улучшенная версия) успешно инициализирован ---")
+        logger.info("--- RAG-цепочка успешно создана/обновлена ---")
+
+    def reload(self):
+        """Перезагружает векторную базу данных и RAG-цепочку."""
+        logger.info("🔃 Получена команда на перезагрузку агента...")
+        try:
+            self._initialize_rag_chain()
+            logger.info("✅ Агент успешно перезагружен с новой базой знаний.")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка при перезагрузке агента: {e}", exc_info=True)
+            return False
 
     def get_session_history(self, session_id: str):
         if session_id not in self.store:
@@ -83,7 +94,6 @@ class Agent:
             {"input": user_question},
             config={"configurable": {"session_id": session_id}},
         )
-        # От новой цепочки create_retrieval_chain ответ приходит в словаре {'answer': '...'}
         for chunk in stream:
             if 'answer' in chunk:
                 yield chunk['answer']

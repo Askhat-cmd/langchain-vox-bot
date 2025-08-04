@@ -9,3 +9,4 @@ chromadb
 text-splitter
 tiktoken
 langchain-community
+python-multipart
