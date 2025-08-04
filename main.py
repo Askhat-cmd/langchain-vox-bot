@@ -4,9 +4,9 @@
 - API для просмотра логов
 - Статика для UI логов
 """
-import os, logging, uuid, json, asyncio, io, shutil, subprocess, time
+import os, logging, uuid, json, asyncio, io, shutil, time
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, status, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 app.mount("/logs-ui", StaticFiles(directory="logs-ui", html=True), name="logs-ui")
+
+PROMPTS_FILE = "prompts.json"
 
 try:
     agent = Agent()
@@ -46,6 +48,7 @@ async def root():
         "• UI логов — <code>/logs-ui/</code></h3>"
     )
 
+# ... (остальные роуты для логов и CSV остаются без изменений) ...
 @app.get("/logs")
 async def get_logs(q: str | None = None,
                    date_from: str | None = None,
@@ -72,9 +75,6 @@ async def get_logs(q: str | None = None,
 
 @app.delete("/logs")
 async def clear_logs():
-    """
-    Удаляет все логи.
-    """
     try:
         await delete_all_logs()
         logger.info("🗑️ Все логи были удалены.")
@@ -94,8 +94,33 @@ async def get_logs_csv():
         headers={"Content-Disposition": 'attachment; filename="call_logs.csv"'}
     )
 
+# --- API для Базы Знаний и Промптов ---
+
+@app.get("/api/prompts")
+async def get_prompts():
+    try:
+        with open(PROMPTS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        return JSONResponse(status_code=500, content={"error": f"Не удалось прочитать файл промптов: {e}"})
+
+@app.post("/api/prompts")
+async def update_prompts(new_prompts: Dict[str, Any]):
+    try:
+        with open(PROMPTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(new_prompts, f, ensure_ascii=False, indent=2)
+        
+        # Перезагружаем агента, чтобы он подхватил новые промпты
+        if agent and hasattr(agent, 'reload'):
+            agent.reload()
+            
+        return JSONResponse(content={"message": "Промпты успешно обновлены."})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Не удалось сохранить промпты: {e}"})
+
 @app.get("/kb")
 async def get_knowledge_base():
+    # ... (без изменений) ...
     kb_path = "Метротест_САЙТ.txt"
     try:
         with open(kb_path, 'r', encoding='utf-8') as f:
@@ -108,13 +133,13 @@ async def get_knowledge_base():
 
 @app.post("/kb/upload")
 async def upload_kb(file: UploadFile = File(...)):
+    # ... (без изменений) ...
     if not file.filename.endswith('.txt'):
         return JSONResponse(status_code=400, content={"message": "Ошибка: Пожалуйста, загрузите .txt файл."})
 
     try:
         kb_path = "Метротест_САЙТ.txt"
         
-        # 1. Бэкап
         backup_dir = "kb_backups"
         os.makedirs(backup_dir, exist_ok=True)
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -122,13 +147,11 @@ async def upload_kb(file: UploadFile = File(...)):
         shutil.copy(kb_path, backup_path)
         logger.info(f"💾 Создан бэкап базы знаний: {backup_path}")
 
-        # 2. Сохраняем новый файл
         with open(kb_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
         logger.info(f"✅ Новый файл базы знаний '{file.filename}' сохранен.")
 
-        # 3. Асинхронно запускаем пересоздание эмбеддингов
         asyncio.create_task(recreate_embeddings_and_reload_agent())
         
         return JSONResponse(status_code=202, content={"message": "Файл принят. Начался процесс обновления базы знаний. Это может занять несколько минут."})
@@ -138,14 +161,13 @@ async def upload_kb(file: UploadFile = File(...)):
         return JSONResponse(status_code=500, content={"message": f"Внутренняя ошибка сервера: {e}"})
 
 async def recreate_embeddings_and_reload_agent():
+    # ... (без изменений) ...
     logger.info("⏳ Начинаем пересоздание эмбеддингов в фоновом режиме...")
     loop = asyncio.get_event_loop()
     try:
-        # Запускаем синхронную функцию в отдельном потоке, чтобы не блокировать event loop
         await loop.run_in_executor(None, recreate_embeddings)
         logger.info("✅ Эмбеддинги успешно пересозданы.")
         
-        # Перезагружаем агента
         if agent and hasattr(agent, 'reload'):
             agent.reload()
             
@@ -174,7 +196,8 @@ async def websocket_endpoint(websocket: WebSocket, callerId: str = Query(None)):
         return
 
     try:
-        greeting = "Здравствуйте, Вы позвонили в компанию «Метротэст». Чем я могу помочь?"
+        # Загружаем приветствие из файла
+        greeting = agent.prompts.get("greeting", "Здравствуйте, чем могу помочь?")
         active_calls[session_id]["transcript"].append(
             {"speaker": "bot", "text": greeting, "timestamp": datetime.now(timezone.utc).isoformat()}
         )
@@ -208,6 +231,7 @@ async def websocket_endpoint(websocket: WebSocket, callerId: str = Query(None)):
         logger.error(f"Ошибка WS ({session_id}): {e}", exc_info=True)
         active_calls[session_id]["status"] = "Failed"
     finally:
+        # ... (логика сохранения лога без изменений) ...
         end_time = datetime.now(timezone.utc)
         call_log = active_calls.get(session_id)
         if call_log:

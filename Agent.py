@@ -8,39 +8,34 @@ from dotenv import load_dotenv
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 import logging
+import json
 
 load_dotenv()
 
 PERSIST_DIRECTORY = "chroma_db_metrotech"
+PROMPTS_FILE = "prompts.json"
 logger = logging.getLogger(__name__)
-
-# Промпт для переформулирования вопроса с учетом истории
-contextualize_q_system_prompt = """Учитывая историю чата и последний вопрос пользователя, который может ссылаться на контекст в истории чата, \
-сформулируй самостоятельный вопрос, который можно понять без истории чата. НЕ отвечай на вопрос, \
-просто переформулируй его, если это необходимо, в противном случае верни его как есть."""
-
-# Основной системный промпт для ответа (без саммаризации)
-qa_system_prompt = """
-Ты — русскоязычный нейро-консультант "Метротэст".
-- Отвечай вежливо, профессионально и по делу, основываясь на контексте из базы знаний.
-- Формируй ответ по одному предложению. В конце каждого предложения ставь разделитель "|".
-- Если для полного ответа не хватает информации, задай уточняющий вопрос.
-- Если в базе знаний нет ответа, сообщи об этом.
-- Используй историю диалога для поддержания контекста.
-
----
-**Контекст из базы знаний:**
-{context}
----
-"""
 
 class Agent:
     def __init__(self) -> None:
         logger.info("--- Инициализация Агента 'Метротест' ---")
         self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.2, streaming=True)
         self.store = {}
+        self.prompts = self.load_prompts()
         self._initialize_rag_chain()
         logger.info("--- Агент 'Метротест' успешно инициализирован ---")
+
+    def load_prompts(self):
+        try:
+            with open(PROMPTS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.error(f"Не удалось загрузить промпты из {PROMPTS_FILE}: {e}")
+            # Возвращаем дефолтные значения в случае ошибки
+            return {
+                "contextualize_q_system_prompt": "...",
+                "qa_system_prompt": "..."
+            }
 
     def _initialize_rag_chain(self):
         """Инициализирует или перезагружает компоненты RAG."""
@@ -53,12 +48,12 @@ class Agent:
         logger.info("Подключение к базе данных успешно.")
         
         contextualize_q_prompt = ChatPromptTemplate.from_messages(
-            [("system", contextualize_q_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
+            [("system", self.prompts["contextualize_q_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
         history_aware_retriever = create_history_aware_retriever(self.llm, self.retriever, contextualize_q_prompt)
 
         qa_prompt = ChatPromptTemplate.from_messages(
-            [("system", qa_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
+            [("system", self.prompts["qa_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
         question_answer_chain = create_stuff_documents_chain(self.llm, qa_prompt)
         
@@ -74,11 +69,12 @@ class Agent:
         logger.info("--- RAG-цепочка успешно создана/обновлена ---")
 
     def reload(self):
-        """Перезагружает векторную базу данных и RAG-цепочку."""
+        """Перезагружает промпты, векторную базу данных и RAG-цепочку."""
         logger.info("🔃 Получена команда на перезагрузку агента...")
         try:
+            self.prompts = self.load_prompts()
             self._initialize_rag_chain()
-            logger.info("✅ Агент успешно перезагружен с новой базой знаний.")
+            logger.info("✅ Агент успешно перезагружен с новой базой знаний и промптами.")
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка при перезагрузке агента: {e}", exc_info=True)
