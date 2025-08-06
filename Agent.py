@@ -9,11 +9,10 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 import logging
 import json
+import os
 
 load_dotenv()
 
-PERSIST_DIRECTORY = "chroma_db_metrotech"
-PROMPTS_FILE = "prompts.json"
 logger = logging.getLogger(__name__)
 
 class Agent:
@@ -21,32 +20,46 @@ class Agent:
         logger.info("--- Инициализация Агента 'Метротест' ---")
         self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.2, streaming=True)
         self.store = {}
-        self.prompts = self.load_prompts()
+        try:
+            self.prompts = self.load_prompts()
+        except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+            logger.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать агента из-за проблемы с конфигурацией промптов. {e}", exc_info=True)
+            # Прерываем выполнение, чтобы предотвратить запуск с неверной конфигурацией
+            raise SystemExit(f"Остановка приложения: {e}")
+
         self._initialize_rag_chain()
         logger.info("--- Агент 'Метротест' успешно инициализирован ---")
 
     def load_prompts(self):
+        prompts_file = os.getenv("PROMPTS_FILE_PATH")
+        if not prompts_file:
+            raise ValueError("Переменная окружения PROMPTS_FILE_PATH не установлена.")
+
+        logger.info(f"Загрузка промптов из файла: '{prompts_file}'")
         try:
-            with open(PROMPTS_FILE, 'r', encoding='utf-8') as f:
+            with open(prompts_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.error(f"Не удалось загрузить промпты из {PROMPTS_FILE}: {e}")
-            # Возвращаем дефолтные значения в случае ошибки
-            return {
-                "contextualize_q_system_prompt": "...",
-                "qa_system_prompt": "..."
-            }
+        except FileNotFoundError:
+            logger.error(f"Файл промптов не найден по пути: {prompts_file}")
+            raise
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка декодирования JSON в файле {prompts_file}: {e}")
+            raise
 
     def _initialize_rag_chain(self):
         """Инициализирует или перезагружает компоненты RAG."""
         logger.info("Инициализация или перезагрузка RAG-цепочки...")
-        
-        logger.info(f"Подключение к векторной базе в '{PERSIST_DIRECTORY}'...")
+
+        persist_directory = os.getenv("PERSIST_DIRECTORY")
+        if not persist_directory:
+             raise ValueError("Переменная окружения PERSIST_DIRECTORY не установлена.")
+
+        logger.info(f"Подключение к векторной базе в '{persist_directory}'...")
         embeddings = OpenAIEmbeddings(chunk_size=1000)
-        self.db = Chroma(persist_directory=PERSIST_DIRECTORY, embedding_function=embeddings)
+        self.db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
         self.retriever = self.db.as_retriever(search_type="mmr", search_kwargs={"k": 5})
         logger.info("Подключение к базе данных успешно.")
-        
+
         contextualize_q_prompt = ChatPromptTemplate.from_messages(
             [("system", self.prompts["contextualize_q_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
@@ -56,9 +69,9 @@ class Agent:
             [("system", self.prompts["qa_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
         question_answer_chain = create_stuff_documents_chain(self.llm, qa_prompt)
-        
+
         rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
-        
+
         self.conversational_rag_chain = RunnableWithMessageHistory(
             rag_chain,
             self.get_session_history,

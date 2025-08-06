@@ -89,8 +89,9 @@ html,body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);c
 .sort-icon{margin-left:.5rem;opacity:.5;transition:opacity .2s ease;}
 .sortable-header.active .sort-icon{opacity:1;color:var(--primary);}
 /* контролы */
-.search-row{display:flex;gap:.75rem;margin-bottom:1rem;align-items:center;}
-.actions-row{display:flex;flex-wrap:wrap;gap:.75rem;margin-bottom:1rem;align-items:center;}
+.controls{margin-bottom:1rem;}
+.search-row{display:flex;gap:.75rem;margin-bottom:.75rem;align-items:center;}
+.actions-row{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;}
 .search-container{position:relative;flex:1 1 280px;}
 .search-container svg{position:absolute;left:.75rem;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--text-secondary);}
 .search-input, input[type="file"]{box-sizing: border-box;}
@@ -381,7 +382,35 @@ const KnowledgeBaseModal = ({ content, onClose }) => {
     );
 };
 
-const PromptsModal = ({ onClose }) => {
+const ApiKeyModal = ({ onClose, onSave }) => {
+    const [key, setKey] = useState('');
+    return React.createElement("div", { className: "modal show", onClick: onClose },
+        React.createElement("div", { className: "modal-content", style: { maxWidth: '500px' }, onClick: e => e.stopPropagation() },
+            React.createElement("div", { className: "modal-header" },
+                React.createElement("h3", null, "Введите API Ключ"),
+                React.createElement("button", { className: "close-btn", onClick: onClose }, React.createElement(CloseIcon))
+            ),
+            React.createElement("div", { className: "modal-body-padding" },
+                React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '0.875rem', marginTop: 0 } }, "Для выполнения этого действия требуется API-ключ. Введите его ниже."),
+                React.createElement("input", { 
+                    type: "password", 
+                    className: "search-input", 
+                    style: { paddingLeft: '0.75rem', width: '100%' },
+                    value: key,
+                    onChange: e => setKey(e.target.value),
+                    placeholder: "Ваш секретный ключ"
+                })
+            ),
+            React.createElement("div", { className: "actions" },
+                React.createElement("button", { className: "btn btn-secondary", onClick: onClose }, "Отмена"),
+                React.createElement("button", { className: "btn btn-primary", onClick: () => onSave(key) }, "Сохранить и продолжить")
+            )
+        )
+    );
+};
+
+
+const PromptsModal = ({ onClose, fetchWithAuth }) => {
     const [prompts, setPrompts] = useState(null);
     const [originalPrompts, setOriginalPrompts] = useState(null);
     const [status, setStatus] = useState("");
@@ -417,7 +446,7 @@ const PromptsModal = ({ onClose }) => {
     const handleSave = async () => {
         setStatus("Сохранение...");
         try {
-            const response = await fetch('/api/prompts', {
+            const response = await fetchWithAuth('/api/prompts', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(prompts),
@@ -427,7 +456,7 @@ const PromptsModal = ({ onClose }) => {
                 setStatus("Промпты успешно сохранены!");
                 setOriginalPrompts(prompts);
             } else {
-                throw new Error(result.error || "Неизвестная ошибка");
+                throw new Error(result.error || result.detail || "Неизвестная ошибка");
             }
         } catch (err) {
             setStatus(`Ошибка сохранения: ${err.message}`);
@@ -502,7 +531,62 @@ const App = () => {
     const [statusFilter, setStatusFilter] = useState('');
     const [sortField, setSortField] = useState('startTime');
     const [sortDirection, setSortDirection] = useState('desc');
+    const [apiKey, setApiKey] = useState(null);
+    const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+    const [apiKeyCallback, setApiKeyCallback] = useState(null);
 
+    useEffect(() => {
+        const storedKey = sessionStorage.getItem('api_secret_key');
+        if (storedKey) {
+            setApiKey(storedKey);
+        }
+    }, []);
+
+    const requestApiKey = useCallback((callback) => {
+        const storedKey = sessionStorage.getItem('api_secret_key');
+        if (storedKey) {
+            setApiKey(storedKey); // Убедимся что стейт свежий
+            callback(storedKey);
+        } else {
+            setApiKeyCallback(() => callback);
+            setShowApiKeyModal(true);
+        }
+    }, []);
+    
+    const handleApiKeySave = (key) => {
+        if (key) {
+            sessionStorage.setItem('api_secret_key', key);
+            setApiKey(key);
+            if (apiKeyCallback) {
+                apiKeyCallback(key);
+            }
+        }
+        setShowApiKeyModal(false);
+        setApiKeyCallback(null);
+    };
+
+    const fetchWithAuth = useCallback((url, options = {}) => {
+        return new Promise((resolve, reject) => {
+            const performFetch = (key) => {
+                if (!key) {
+                    // Если ключ так и не получен, отклоняем промис
+                    const err = new Error("API ключ не предоставлен.");
+                    showToast("Ошибка", err.message, "error");
+                    return reject(err);
+                }
+                const headers = { ...options.headers, 'X-API-Key': key };
+                fetch(url, { ...options, headers }).then(resolve, reject);
+            };
+
+            const currentApiKey = sessionStorage.getItem('api_secret_key');
+            if (currentApiKey) {
+                performFetch(currentApiKey);
+            } else {
+                requestApiKey(newKey => performFetch(newKey));
+            }
+        });
+    }, [requestApiKey]); // showToast не меняется, requestApiKey мемоизирован
+    
     const stats = useMemo(() => {
         const lower = s => (s || '').toLowerCase();
         const total = logs.length;
@@ -517,7 +601,6 @@ const App = () => {
     const filteredLogs = useMemo(() => {
         let filtered = logs;
         
-        // Фильтрация по статусу
         if (statusFilter) {
             filtered = filtered.filter(log => {
                 const status = (log.status || '').toLowerCase();
@@ -525,7 +608,6 @@ const App = () => {
             });
         }
         
-        // Сортировка
         return [...filtered].sort((a, b) => {
             let aVal, bVal;
             
@@ -648,10 +730,10 @@ const App = () => {
         if (window.confirm("Вы уверены, что хотите удалить ВСЕ логи? Это действие необратимо.")) {
             setError(null);
             try {
-                const response = await fetch("/logs", { method: 'DELETE' });
+                const response = await fetchWithAuth("/logs", { method: 'DELETE' });
                 if (!response.ok) {
                     const res = await response.json();
-                    throw new Error(res.message || `Ошибка ${response.status}`);
+                    throw new Error(res.detail || `Ошибка: Неверный API-ключ или другая ошибка сервера.`);
                 }
                 showToast("Успешно", "Все логи были удалены", "success");
                 fetchLogs(query, true);
@@ -665,8 +747,8 @@ const App = () => {
     const handleKbUpload = async (event) => {
         const file = event.target.files[0];
         if (!file) return;
-        if (!file.name.endsWith('.txt')) {
-            setUploadStatus('Ошибка: Пожалуйста, выберите .txt файл.');
+        if (!file.name.endsWith('.md')) {
+            setUploadStatus('Ошибка: Пожалуйста, выберите .md файл.');
             return;
         }
         const formData = new FormData();
@@ -674,7 +756,7 @@ const App = () => {
         setUploadStatus('Загрузка файла и обновление базы...');
         setError(null);
         try {
-            const response = await fetch('/kb/upload', {
+            const response = await fetchWithAuth('/kb/upload', {
                 method: 'POST',
                 body: formData,
             });
@@ -683,7 +765,7 @@ const App = () => {
                 setUploadStatus(`Успешно: ${result.message}`);
                 showToast("База знаний обновлена", result.message, "success");
             } else {
-                throw new Error(result.message || `Ошибка ${response.status}`);
+                throw new Error(result.detail || `Ошибка: Неверный API-ключ или другая ошибка сервера.`);
             }
         } catch (err) {
             setUploadStatus(`Ошибка: ${err.message}`);
@@ -726,20 +808,22 @@ const App = () => {
                 onClick: () => setQuickFilter('clear') 
             }, "Все")
         ),
-        React.createElement("div", { className: "search-row" },
-            React.createElement("div", { className: "search-container" },
-                React.createElement(SearchIcon),
-                React.createElement("input", { type: "text", className: "search-input", placeholder: "Поиск по номеру или диалогу...", value: query, onChange: (e) => setQuery(e.target.value) })
+        React.createElement("div", { className: "controls" },
+            React.createElement("div", { className: "search-row" },
+                React.createElement("div", { className: "search-container" },
+                    React.createElement(SearchIcon),
+                    React.createElement("input", { type: "text", className: "search-input", placeholder: "Поиск по номеру или диалогу...", value: query, onChange: (e) => setQuery(e.target.value) })
+                ),
+                React.createElement("input", { type: "date", className: "search-input", value: dateFrom, onChange: (e) => setDateFrom(e.target.value) }),
+                React.createElement("input", { type: "date", className: "search-input", value: dateTo, onChange: (e) => setDateTo(e.target.value) })
             ),
-            React.createElement("input", { type: "date", className: "search-input", value: dateFrom, onChange: (e) => setDateFrom(e.target.value) }),
-            React.createElement("input", { type: "date", className: "search-input", value: dateTo, onChange: (e) => setDateTo(e.target.value) })
-        ),
-        React.createElement("div", { className: "actions-row" },
-            React.createElement("a", { href: "/logs/csv", className: "btn btn-success", style: { pointerEvents: !logs.length ? "none" : "auto", opacity: !logs.length ? 0.5 : 1 } }, React.createElement(DownloadIcon), "Экспорт CSV"),
-            React.createElement("button", { className: "btn", onClick: showKnowledgeBase }, React.createElement(BookIcon), "База знаний"),
-            React.createElement("label", { htmlFor: "kb-upload", className: "btn" }, "Обновить БЗ", React.createElement("input", { id: "kb-upload", type: "file", accept: ".txt", style: { display: "none" }, onChange: handleKbUpload })),
-            React.createElement("button", { className: "btn", onClick: () => setShowPromptsModal(true) }, "Упр. промптами"),
-            React.createElement("button", { className: "btn btn-danger", onClick: clearAllLogs, disabled: !logs.length }, React.createElement(TrashIcon), "Очистить логи")
+            React.createElement("div", { className: "actions-row" },
+                React.createElement("a", { href: "/logs/csv", className: "btn btn-success", style: { pointerEvents: !logs.length ? "none" : "auto", opacity: !logs.length ? 0.5 : 1 } }, React.createElement(DownloadIcon), "Экспорт CSV"),
+                React.createElement("button", { className: "btn", onClick: showKnowledgeBase }, React.createElement(BookIcon), "База знаний"),
+                React.createElement("label", { htmlFor: "kb-upload", className: "btn" }, "Обновить БЗ", React.createElement("input", { id: "kb-upload", type: "file", accept: ".md", style: { display: "none" }, onChange: handleKbUpload })),
+                React.createElement("button", { className: "btn", onClick: () => setShowPromptsModal(true) }, "Упр. промптами"),
+                React.createElement("button", { className: "btn btn-danger", onClick: clearAllLogs, disabled: !logs.length }, React.createElement(TrashIcon), "Очистить логи")
+            )
         ),
         uploadStatus && React.createElement("div", { className: uploadStatus.startsWith('Ошибка') ? "error" : "success-message" }, uploadStatus),
         error && React.createElement("div", { className: "error" }, `⚠️ ${error}`),
@@ -783,7 +867,8 @@ const App = () => {
         }),
         React.createElement(Modal, { log: modalLog, onClose: () => setModalLog(null) }),
         React.createElement(KnowledgeBaseModal, { content: kbContent, onClose: () => setKbContent(null) }),
-        showPromptsModal && React.createElement(PromptsModal, { onClose: () => setShowPromptsModal(false) }),
+        showPromptsModal && React.createElement(PromptsModal, { onClose: () => setShowPromptsModal(false), fetchWithAuth: fetchWithAuth }),
+        showApiKeyModal && React.createElement(ApiKeyModal, { onClose: () => handleApiKeySave(null), onSave: handleApiKeySave }),
         React.createElement(ToastContainer, { toasts, onClose: closeToast })
     );
 };
