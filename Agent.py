@@ -20,6 +20,7 @@ class Agent:
         logger.info("--- Инициализация Агента 'Метротест' ---")
         self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.2, streaming=True)
         self.store = {}
+        self.last_kb = "general"
         try:
             self.prompts = self.load_prompts()
         except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
@@ -57,29 +58,74 @@ class Agent:
         logger.info(f"Подключение к векторной базе в '{persist_directory}'...")
         embeddings = OpenAIEmbeddings(chunk_size=1000)
         self.db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        self.retriever = self.db.as_retriever(search_type="mmr", search_kwargs={"k": 5})
+        # Два ретривера по метаданным, меньший k для скорости
+        kb_k = int(os.getenv("KB_TOP_K", "3"))
+        self.retriever_general = self.db.as_retriever(
+            search_type="similarity", search_kwargs={"k": kb_k, "filter": {"kb": "general"}}
+        )
+        self.retriever_tech = self.db.as_retriever(
+            search_type="similarity", search_kwargs={"k": kb_k, "filter": {"kb": "tech"}}
+        )
         logger.info("Подключение к базе данных успешно.")
 
         contextualize_q_prompt = ChatPromptTemplate.from_messages(
             [("system", self.prompts["contextualize_q_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
-        history_aware_retriever = create_history_aware_retriever(self.llm, self.retriever, contextualize_q_prompt)
+        # Историзованные ретриверы для обеих БЗ
+        history_aware_retriever_general = create_history_aware_retriever(self.llm, self.retriever_general, contextualize_q_prompt)
+        history_aware_retriever_tech = create_history_aware_retriever(self.llm, self.retriever_tech, contextualize_q_prompt)
 
         qa_prompt = ChatPromptTemplate.from_messages(
             [("system", self.prompts["qa_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
         question_answer_chain = create_stuff_documents_chain(self.llm, qa_prompt)
 
-        rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+        rag_chain_general = create_retrieval_chain(history_aware_retriever_general, question_answer_chain)
+        rag_chain_tech = create_retrieval_chain(history_aware_retriever_tech, question_answer_chain)
 
-        self.conversational_rag_chain = RunnableWithMessageHistory(
-            rag_chain,
+        self.conversational_rag_chain_general = RunnableWithMessageHistory(
+            rag_chain_general,
+            self.get_session_history,
+            input_messages_key="input",
+            history_messages_key="chat_history",
+            output_messages_key="answer",
+        )
+        self.conversational_rag_chain_tech = RunnableWithMessageHistory(
+            rag_chain_tech,
             self.get_session_history,
             input_messages_key="input",
             history_messages_key="chat_history",
             output_messages_key="answer",
         )
         logger.info("--- RAG-цепочка успешно создана/обновлена ---")
+
+    def _route_kb(self, text: str) -> str:
+        """Простая и быстрая маршрутизация: general | tech.
+        Выбираем 'tech', если обнаружены технические маркеры; иначе 'general'."""
+        if not text:
+            return "general"
+        t = text.lower()
+        tech_markers = [
+            "техн", "характерист", "параметр", "диапазон", "класс точности", "нагруз", "датчик",
+            "тензо", "разрывн", "машин", "усилие", "кн", "мпа", "ньютон", "мм", "гост", "iso",
+            "сертиф", "модуль", "частота", "вибро", "сопротивл", "протокол", "datasheet", "spec"
+        ]
+        general_markers = ["цена", "стоимость", "контакт", "гарант", "доставка", "оплата", "адрес"]
+        if any(m in t for m in tech_markers) and not any(m in t for m in general_markers):
+            return "tech"
+        return "general"
+
+    def _max_relevance(self, question: str, kb: str, k: int) -> float:
+        try:
+            # Для оценки порога берём релевантность напрямую из векторного стора
+            res = self.db.similarity_search_with_relevance_scores(
+                question, k=k, filter={"kb": kb}
+            )
+            if not res:
+                return 0.0
+            return max(score for _, score in res)
+        except Exception:
+            return 1.0  # если стор не вернул оценку, не триггерим фолбэк
 
     def reload(self):
         """Перезагружает промпты, векторную базу данных и RAG-цепочку."""
@@ -99,7 +145,24 @@ class Agent:
         return self.store[session_id]
 
     def get_response_generator(self, user_question: str, session_id: str):
-        stream = self.conversational_rag_chain.stream(
+        target = self._route_kb(user_question)
+        # Порог и k берём из env (по умолчанию 0.2 и 3)
+        threshold = float(os.getenv("KB_FALLBACK_THRESHOLD", "0.2"))
+        k = int(os.getenv("KB_TOP_K", "3"))
+        # Оценим релевантность выбранной БЗ; при низкой — попробуем вторую
+        max_score = self._max_relevance(user_question, target, k)
+        alt = "tech" if target == "general" else "general"
+        if max_score < threshold:
+            alt_score = self._max_relevance(user_question, alt, k)
+            if alt_score > max_score:
+                logger.info(
+                    f"Низкая релевантность ({max_score:.2f}) для {target} → переключаемся на {alt} ({alt_score:.2f})"
+                )
+                target = alt
+        self.last_kb = target
+        logger.info(f"Маршрутизация вопроса в БЗ: {target}")
+        chain = self.conversational_rag_chain_tech if target == "tech" else self.conversational_rag_chain_general
+        stream = chain.stream(
             {"input": user_question},
             config={"configurable": {"session_id": session_id}},
         )

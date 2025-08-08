@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from Agent import Agent
+from text_normalizer import normalize as normalize_text
 from log_storage import insert_log, query_logs, to_csv, delete_all_logs
 from create_embeddings import recreate_embeddings
 
@@ -62,6 +63,29 @@ def duplicate_headers_without_hashes(text: str) -> str:
     processed_text = re.sub(r"^(#{1,6}\s.+)", replacer, text, flags=re.MULTILINE)
     return processed_text
 
+def _update_env_file(vars_to_set: Dict[str, str]) -> None:
+    env_path = os.path.join(os.getcwd(), ".env")
+    lines: list[str] = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    keys = set(vars_to_set.keys())
+    new_lines: list[str] = []
+    for line in lines:
+        if not line or line.strip().startswith("#"):
+            new_lines.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in keys:
+            new_lines.append(f"{key}={vars_to_set[key]}")
+            keys.remove(key)
+        else:
+            new_lines.append(line)
+    for k in keys:
+        new_lines.append(f"{k}={vars_to_set[k]}")
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(new_lines) + "\n")
+
 
 # --- Модели данных (Pydantic) ---
 
@@ -70,6 +94,13 @@ class PromptsUpdatePayload(BaseModel):
     greeting: str = Field(..., min_length=1, description="Приветственное сообщение бота.")
     contextualize_q_system_prompt: str = Field(..., min_length=1, description="Системный промпт для контекстуализации.")
     qa_system_prompt: str = Field(..., min_length=1, description="Основной системный промпт для ответов на вопросы.")
+
+class SearchSettingsPayload(BaseModel):
+    kb_top_k: int | None = Field(None, ge=1, le=20)
+    kb_fallback_threshold: float | None = Field(None, ge=0.0, le=1.0)
+
+class NormalizeRequest(BaseModel):
+    text: str
 
 
 # --- Безопасность ---
@@ -110,7 +141,8 @@ async def root():
     return HTMLResponse(
         "<h3>Бэкенд 'Метротэст' активен.<br>"
         "• WebSocket — <code>/ws</code><br>"
-        "• UI логов — <code>/logs-ui/</code></h3>"
+        "• UI логов — <code>/logs-ui/</code><br>"
+        "• Тест нормализации — <code>POST /api/normalize</code></h3>"
     )
 
 # ... (остальные роуты для логов и CSV остаются без изменений) ...
@@ -190,6 +222,41 @@ async def update_prompts(payload: PromptsUpdatePayload): # NEW: Использу
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Не удалось сохранить промпты: {e}")
 
+@app.get("/api/settings")
+async def get_search_settings():
+    return {
+        "kb_top_k": int(os.getenv("KB_TOP_K", "3")),
+        "kb_fallback_threshold": float(os.getenv("KB_FALLBACK_THRESHOLD", "0.2")),
+    }
+
+@app.post("/api/settings", dependencies=[Depends(get_api_key)])
+async def update_search_settings(payload: SearchSettingsPayload):
+    try:
+        to_set: Dict[str, str] = {}
+        if payload.kb_top_k is not None:
+            to_set["KB_TOP_K"] = str(payload.kb_top_k)
+            os.environ["KB_TOP_K"] = str(payload.kb_top_k)
+        if payload.kb_fallback_threshold is not None:
+            to_set["KB_FALLBACK_THRESHOLD"] = str(payload.kb_fallback_threshold)
+            os.environ["KB_FALLBACK_THRESHOLD"] = str(payload.kb_fallback_threshold)
+
+        if to_set:
+            _update_env_file(to_set)
+            if agent and hasattr(agent, 'reload'):
+                agent.reload()
+        return JSONResponse(content={"message": "Настройки сохранены"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось сохранить настройки: {e}")
+
+
+@app.post("/api/normalize")
+async def api_normalize(payload: NormalizeRequest):
+    try:
+        normalized = normalize_text(payload.text)
+        return {"raw": payload.text, "normalized": normalized}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/kb")
 async def get_knowledge_base():
     kb_path = os.getenv("KNOWLEDGE_BASE_PATH")
@@ -246,6 +313,61 @@ async def upload_kb(file: UploadFile = File(...)):
         logger.error(f"❌ Ошибка при загрузке файла БЗ: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {e}")
 
+# --- База знаний (TECH) ---
+
+@app.get("/kb2")
+async def get_knowledge_base_tech():
+    kb_path = os.getenv("KNOWLEDGE_BASE2_PATH")
+    if not kb_path:
+        raise HTTPException(status_code=500, detail="Переменная окружения KNOWLEDGE_BASE2_PATH не установлена.")
+    try:
+        with open(kb_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return JSONResponse(content={"text": content})
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Файл технической базы знаний не найден")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/kb2/upload", dependencies=[Depends(get_api_key)])
+async def upload_kb_tech(file: UploadFile = File(...)):
+    kb_path = os.getenv("KNOWLEDGE_BASE2_PATH")
+    if not kb_path:
+        raise HTTPException(status_code=500, detail="Переменная окружения KNOWLEDGE_BASE2_PATH не установлена.")
+
+    if not file.filename.endswith('.md'):
+        raise HTTPException(status_code=400, detail="Ошибка: Пожалуйста, загрузите .md файл.")
+
+    try:
+        content_bytes = await file.read()
+        content_text = content_bytes.decode('utf-8')
+
+        logger.info("[TECH KB] Дублирование заголовков в загруженном файле...")
+        enriched_content = duplicate_headers_without_hashes(content_text)
+        logger.info("[TECH KB] Заголовки успешно продублированы.")
+
+        backup_dir = "kb_backups"
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        backup_path = os.path.join(backup_dir, f"knowledge_base2_{timestamp}.md.bak")
+        if os.path.exists(kb_path):
+            shutil.copy(kb_path, backup_path)
+            logger.info(f"💾 Создан бэкап ТЕХ БЗ: {backup_path}")
+
+        with open(kb_path, "w", encoding='utf-8') as buffer:
+            buffer.write(enriched_content)
+
+        logger.info(f"✅ Новый файл ТЕХ БЗ '{file.filename}' сохранен с обогащенными заголовками.")
+
+        asyncio.create_task(recreate_embeddings_and_reload_agent())
+
+        return JSONResponse(status_code=202, content={"message": "Файл принят. Начался процесс обновления ТЕХ БЗ. Это может занять несколько минут."})
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при загрузке ТЕХ БЗ: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {e}")
+
 async def recreate_embeddings_and_reload_agent():
     logger.info("⏳ Начинаем пересоздание эмбеддингов в фоновом режиме...")
     loop = asyncio.get_event_loop()
@@ -292,12 +414,13 @@ async def websocket_endpoint(websocket: WebSocket, callerId: str = Query(None)):
 
         while True:
             data = await websocket.receive_text()
-            logger.info(f"Получен вопрос ({session_id}): {data}")
+            norm = normalize_text(data)
+            logger.info(f"Получен вопрос ({session_id}) RAW='{data}' NORM='{norm}'")
             active_calls[session_id]["transcript"].append(
-                {"speaker": "user", "text": data, "timestamp": datetime.now(timezone.utc).isoformat()}
+                {"speaker": "user", "text": norm, "raw": data, "timestamp": datetime.now(timezone.utc).isoformat()}
             )
 
-            response_generator = agent.get_response_generator(data, session_id=session_id)
+            response_generator = agent.get_response_generator(norm, session_id=session_id)
 
             full_response = ""
             for chunk in response_generator:
@@ -306,8 +429,14 @@ async def websocket_endpoint(websocket: WebSocket, callerId: str = Query(None)):
                     full_response += chunk
 
             logger.info(f"Полный ответ ({session_id}) отправлен.")
+            kb_used = getattr(agent, 'last_kb', None)
             active_calls[session_id]["transcript"].append(
-                {"speaker": "bot", "text": full_response, "timestamp": datetime.now(timezone.utc).isoformat()}
+                {
+                    "speaker": "bot",
+                    "text": full_response,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "kb": kb_used,
+                }
             )
             active_calls[session_id]["status"] = "InProgress"
 

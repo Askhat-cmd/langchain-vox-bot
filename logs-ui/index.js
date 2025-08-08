@@ -279,6 +279,18 @@ const StatsList = ({ stats }) => (
     )
 );
 
+// Helper: извлечь kb из последнего ответа бота в транскрипте
+const getKbFromLog = (log) => {
+  try {
+    const arr = JSON.parse(log.transcript_json || '[]');
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const t = arr[i];
+      if (t && t.speaker === 'bot' && t.kb) return t.kb;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+};
+
 const LogTable = ({ logs, onRowClick, sortField, sortDirection, onSort }) => {
   if (!logs.length) {
     return (
@@ -318,15 +330,21 @@ const LogTable = ({ logs, onRowClick, sortField, sortDirection, onSort }) => {
           )
         ),
         React.createElement("tbody", null,
-          logs.map(log => (
-            React.createElement("tr", { key: log.id, onClick: () => onRowClick(log) },
-              React.createElement("td", null, React.createElement("code", null, `${log.id.slice(0, 8)}…`)),
-              React.createElement("td", null, log.callerId || '—'),
-              React.createElement("td", null, formatDate(log.startTime)),
-              React.createElement("td", null, formatDuration(log.startTime, log.endTime)),
-              React.createElement("td", null, React.createElement("span", { className: `status ${(log.status || '').toLowerCase()}` }, log.status))
-            )
-          ))
+          logs.map(log => {
+            const kb = getKbFromLog(log);
+            return (
+              React.createElement("tr", { key: log.id, onClick: () => onRowClick(log) },
+                React.createElement("td", null, React.createElement("code", null, `${(log.id || '').slice(0, 8)}…`)),
+                React.createElement("td", null, log.callerId || '—'),
+                React.createElement("td", null, formatDate(log.startTime)),
+                React.createElement("td", null, formatDuration(log.startTime, log.endTime)),
+                React.createElement("td", null,
+                  React.createElement("span", { className: `status ${(log.status || '').toLowerCase()}` }, log.status),
+                  kb ? React.createElement("span", { style:{marginLeft:'.5rem', fontSize:'.7rem', opacity:.8} }, `[${kb}]`) : null
+                )
+              )
+            );
+          })
         )
       )
     )
@@ -359,7 +377,10 @@ const Modal = ({ log, onClose }) => {
                 React.createElement("div", { className: "transcript" },
                     React.createElement("h4", null, "Транскрипт разговора"),
                     transcript.map((turn, index) =>
-                        React.createElement("div", { key: index, className: `turn ${turn.speaker}` }, turn.text)
+                        React.createElement("div", { key: index, className: `turn ${turn.speaker}` },
+                            React.createElement("div", null, turn.text),
+                            (turn.speaker === 'bot' && turn.kb) ? React.createElement("div", { style:{ fontSize: '.75rem', opacity: .7, marginTop: '.25rem' } }, `[${turn.kb}]`) : null
+                        )
                     )
                 )
             )
@@ -407,6 +428,70 @@ const ApiKeyModal = ({ onClose, onSave }) => {
             )
         )
     );
+};
+
+// NEW: Settings modal for KB_TOP_K and KB_FALLBACK_THRESHOLD
+const SettingsModal = ({ initial, onClose, fetchWithAuth }) => {
+    const [k, setK] = useState(initial?.kb_top_k ?? 3);
+    const [thr, setThr] = useState(initial?.kb_fallback_threshold ?? 0.2);
+    const [status, setStatus] = useState('');
+    const save = async () => {
+        setStatus('Сохранение...');
+        try {
+            const res = await fetchWithAuth('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kb_top_k: Number(k), kb_fallback_threshold: Number(thr) })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Ошибка сохранения');
+            setStatus('Настройки сохранены');
+            setTimeout(onClose, 800);
+        } catch (e) {
+            setStatus('Ошибка: ' + e.message);
+        }
+    };
+    return React.createElement('div', { className: 'modal show', onClick: onClose },
+        React.createElement('div', { className: 'modal-content', style:{maxWidth:'520px'}, onClick: e=>e.stopPropagation() },
+            React.createElement('div', { className: 'modal-header' },
+                React.createElement('h3', null, 'Настройки поиска'),
+                React.createElement('button', { className: 'close-btn', onClick: onClose }, React.createElement(CloseIcon))
+            ),
+            React.createElement('div', { className: 'modal-body-padding' },
+                React.createElement('label', { className: 'prompt-label' }, 'Сколько документов брать (k)'),
+                React.createElement('input', { type:'number', min:1, max:20, value:k, onChange: e=>setK(e.target.value), className:'search-input', style:{maxWidth:'120px', marginBottom:'1rem'} }),
+                React.createElement('label', { className: 'prompt-label' }, 'Порог уверенности (0..1)'),
+                React.createElement('input', { type:'number', step:'0.05', min:0, max:1, value:thr, onChange: e=>setThr(e.target.value), className:'search-input', style:{maxWidth:'120px'} }),
+                status && React.createElement('div', { style:{marginTop:'1rem', color:'var(--text-secondary)'} }, status)
+            ),
+            React.createElement('div', { className:'actions' },
+                React.createElement('button', { className:'btn btn-secondary', onClick:onClose }, 'Отмена'),
+                React.createElement('button', { className:'btn', onClick:save }, 'Сохранить')
+            )
+        )
+    );
+};
+
+// NEW: Help / instruction modal
+const HelpModal = ({ onClose }) => {
+  const [text, setText] = React.useState('Загрузка инструкции...');
+  React.useEffect(() => {
+    fetch('instruction.md').then(r => r.text()).then(setText).catch(() => setText('Не удалось загрузить instruction.md'));
+  }, []);
+  return React.createElement('div', { className:'modal show', onClick:onClose },
+    React.createElement('div', { className:'modal-content', style:{maxWidth:'720px'}, onClick:e=>e.stopPropagation() },
+      React.createElement('div', { className:'modal-header' },
+        React.createElement('h3', null, 'Инструкция по настройке'),
+        React.createElement('button', { className:'close-btn', onClick:onClose }, React.createElement(CloseIcon))
+      ),
+      React.createElement('div', { className:'modal-body-padding' },
+        React.createElement('pre', { style:{ whiteSpace:'pre-wrap', lineHeight:'1.6' } }, text)
+      ),
+      React.createElement('div', { className:'actions' },
+        React.createElement('button', { className:'btn', onClick:onClose }, 'Понятно')
+      )
+    )
+  );
 };
 
 
@@ -534,6 +619,8 @@ const App = () => {
     const [apiKey, setApiKey] = useState(null);
     const [showApiKeyModal, setShowApiKeyModal] = useState(false);
     const [apiKeyCallback, setApiKeyCallback] = useState(null);
+    const [settings, setSettings] = useState(null);
+  const [helpOpen, setHelpOpen] = useState(false);
 
     useEffect(() => {
         const storedKey = sessionStorage.getItem('api_secret_key');
@@ -586,6 +673,16 @@ const App = () => {
             }
         });
     }, [requestApiKey]); // showToast не меняется, requestApiKey мемоизирован
+
+    const openSettings = async () => {
+        try {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            setSettings(data);
+        } catch (e) {
+            showToast('Ошибка', 'Не удалось загрузить настройки', 'error');
+        }
+    };
     
     const stats = useMemo(() => {
         const lower = s => (s || '').toLowerCase();
@@ -726,6 +823,17 @@ const App = () => {
         }
     };
 
+    // NEW: показать TECH базу знаний
+    const showKnowledgeBaseTech = async () => {
+        try {
+            const response = await fetch("/kb2");
+            const data = await response.json();
+            setKbContent(data);
+        } catch (err) {
+            setKbContent({ error: "Ошибка загрузки TECH базы знаний" });
+        }
+    };
+
     const clearAllLogs = async () => {
         if (window.confirm("Вы уверены, что хотите удалить ВСЕ логи? Это действие необратимо.")) {
             setError(null);
@@ -770,6 +878,37 @@ const App = () => {
         } catch (err) {
             setUploadStatus(`Ошибка: ${err.message}`);
             showToast("Ошибка загрузки", err.message, "error");
+            setError(err.message);
+        }
+    };
+
+    // NEW: загрузить TECH базу знаний
+    const handleKbUploadTech = async (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+        if (!file.name.endsWith('.md')) {
+            setUploadStatus('Ошибка: Пожалуйста, выберите .md файл.');
+            return;
+        }
+        const formData = new FormData();
+        formData.append('file', file);
+        setUploadStatus('Загрузка TECH базы и обновление индексов...');
+        setError(null);
+        try {
+            const response = await fetchWithAuth('/kb2/upload', {
+                method: 'POST',
+                body: formData,
+            });
+            const result = await response.json();
+            if (response.ok) {
+                setUploadStatus(`Успешно: ${result.message}`);
+                showToast("TECH база знаний обновлена", result.message, "success");
+            } else {
+                throw new Error(result.detail || `Ошибка: Неверный API-ключ или другая ошибка сервера.`);
+            }
+        } catch (err) {
+            setUploadStatus(`Ошибка: ${err.message}`);
+            showToast("Ошибка загрузки TECH базы", err.message, "error");
             setError(err.message);
         }
     };
@@ -819,9 +958,13 @@ const App = () => {
             ),
             React.createElement("div", { className: "actions-row" },
                 React.createElement("a", { href: "/logs/csv", className: "btn btn-success", style: { pointerEvents: !logs.length ? "none" : "auto", opacity: !logs.length ? 0.5 : 1 } }, React.createElement(DownloadIcon), "Экспорт CSV"),
-                React.createElement("button", { className: "btn", onClick: showKnowledgeBase }, React.createElement(BookIcon), "База знаний"),
-                React.createElement("label", { htmlFor: "kb-upload", className: "btn" }, "Обновить БЗ", React.createElement("input", { id: "kb-upload", type: "file", accept: ".md", style: { display: "none" }, onChange: handleKbUpload })),
+                React.createElement("button", { className: "btn", onClick: showKnowledgeBase }, React.createElement(BookIcon), "База знаний (general)"),
+                React.createElement("button", { className: "btn", onClick: showKnowledgeBaseTech }, React.createElement(BookIcon), "База знаний (tech)"),
+                React.createElement("label", { htmlFor: "kb-upload", className: "btn" }, "Обновить БЗ (general)", React.createElement("input", { id: "kb-upload", type: "file", accept: ".md", style: { display: "none" }, onChange: handleKbUpload })),
+                React.createElement("label", { htmlFor: "kb2-upload", className: "btn" }, "Обновить БЗ (tech)", React.createElement("input", { id: "kb2-upload", type: "file", accept: ".md", style: { display: "none" }, onChange: handleKbUploadTech })),
                 React.createElement("button", { className: "btn", onClick: () => setShowPromptsModal(true) }, "Упр. промптами"),
+                React.createElement("button", { className: "btn btn-secondary", onClick: openSettings }, "Настройки поиска"),
+                React.createElement("button", { className: "btn btn-secondary", onClick: () => setHelpOpen(true) }, "Инструкция по настройке"),
                 React.createElement("button", { className: "btn btn-danger", onClick: clearAllLogs, disabled: !logs.length }, React.createElement(TrashIcon), "Очистить логи")
             )
         ),
@@ -866,6 +1009,8 @@ const App = () => {
             onSort: handleSort
         }),
         React.createElement(Modal, { log: modalLog, onClose: () => setModalLog(null) }),
+        settings && React.createElement(SettingsModal, { initial: settings, onClose: () => setSettings(null), fetchWithAuth }),
+        helpOpen && React.createElement(HelpModal, { onClose: () => setHelpOpen(false) }),
         React.createElement(KnowledgeBaseModal, { content: kbContent, onClose: () => setKbContent(null) }),
         showPromptsModal && React.createElement(PromptsModal, { onClose: () => setShowPromptsModal(false), fetchWithAuth: fetchWithAuth }),
         showApiKeyModal && React.createElement(ApiKeyModal, { onClose: () => handleApiKeySave(null), onSave: handleApiKeySave }),

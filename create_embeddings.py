@@ -20,8 +20,14 @@ load_dotenv()
 
 # --- Константы из .env ---
 KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "knowledge_base.md")
+KNOWLEDGE_BASE2_PATH = os.getenv("KNOWLEDGE_BASE2_PATH", "knowledge_base_2.md")
 PERSIST_DIRECTORY = os.getenv("PERSIST_DIRECTORY", "chroma_db_metrotech")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Санитизация ключа на случай переносов строк/пробелов
+sanitized_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+if sanitized_key:
+    os.environ["OPENAI_API_KEY"] = sanitized_key
+OPENAI_API_KEY = sanitized_key
 
 if not OPENAI_API_KEY:
     logging.error("Не найден ключ OPENAI_API_KEY в .env файле.")
@@ -44,42 +50,64 @@ def duplicate_headers_without_hashes(text: str) -> str:
     processed_text = re.sub(r"^(#{1,6}\s.+)", replacer, text, flags=re.MULTILINE)
     return processed_text
 
+def _load_text(file_path: str) -> str:
+    if not os.path.exists(file_path):
+        logging.warning(f"Файл не найден: {file_path}")
+        return ""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read()
+    except Exception as e:
+        logging.error(f"Ошибка при чтении файла {file_path}: {e}")
+        return ""
+
+
 def create_embeddings():
     """
-    Основная функция для создания и сохранения векторных представлений.
+    Создаёт объединённую векторную базу для двух БЗ с пометками метаданных:
+    - kb = "general" для `knowledge_base.md`
+    - kb = "tech"    для `knowledge_base_2.md`
     """
-    if not os.path.exists(KNOWLEDGE_BASE_PATH):
-        logging.error(f"Файл базы знаний не найден по пути: {KNOWLEDGE_BASE_PATH}")
+    full_text_general = _load_text(KNOWLEDGE_BASE_PATH)
+    full_text_tech = _load_text(KNOWLEDGE_BASE2_PATH)
+
+    if not full_text_general and not full_text_tech:
+        logging.error("Нет данных для индексирования: обе БЗ отсутствуют или пустые.")
         return False
 
-    logging.info(f"Чтение базы знаний из файла: {KNOWLEDGE_BASE_PATH}")
-    try:
-        with open(KNOWLEDGE_BASE_PATH, 'r', encoding='utf-8') as file:
-            full_text = file.read()
-    except Exception as e:
-        logging.error(f"Ошибка при чтении файла: {e}")
+    documents_all = []
+
+    if full_text_general:
+        logging.info("Обогащение (general): дублирование заголовков...")
+        enriched_general = duplicate_headers_without_hashes(full_text_general)
+        logging.info("Разделение (general) по '<<->>'...")
+        splitter_general = RecursiveCharacterTextSplitter(
+            separators=["<<->>"],
+            chunk_size=4000,
+            chunk_overlap=200,
+            add_start_index=True,
+        )
+        docs_general = splitter_general.create_documents([enriched_general], metadatas=[{"kb": "general"}])
+        documents_all.extend(docs_general)
+
+    if full_text_tech:
+        logging.info("Обогащение (tech): дублирование заголовков...")
+        enriched_tech = duplicate_headers_without_hashes(full_text_tech)
+        logging.info("Разделение (tech) по '<<->>'...")
+        splitter_tech = RecursiveCharacterTextSplitter(
+            separators=["<<->>"],
+            chunk_size=4000,
+            chunk_overlap=200,
+            add_start_index=True,
+        )
+        docs_tech = splitter_tech.create_documents([enriched_tech], metadatas=[{"kb": "tech"}])
+        documents_all.extend(docs_tech)
+
+    if not documents_all:
+        logging.warning("Не удалось создать ни одного чанка. Проверьте наличие разделителей '<<->>' в файлах.")
         return False
 
-    # 1. Сначала обогащаем весь текст дубликатами заголовков
-    logging.info("Обогащение текста: дублирование заголовков для улучшения контекста...")
-    enriched_text = duplicate_headers_without_hashes(full_text)
-    logging.info("Текст успешно обогащен.")
-
-    # 2. Затем разделяем текст на чанки по кастомному разделителю '<<->>'
-    logging.info("Разделение текста на чанки по кастомному разделителю '<<->>'...")
-    text_splitter = RecursiveCharacterTextSplitter(
-        separators=["<<->>"], # Указываем наш уникальный разделитель
-        chunk_size=4000, # Устанавливаем большой размер чанка, т.к. делим вручную
-        chunk_overlap=200, # Небольшое перекрытие на всякий случай
-        add_start_index=True,
-    )
-    documents = text_splitter.create_documents([enriched_text])
-
-    if not documents:
-        logging.warning("Не удалось создать ни одного чанка. Проверьте наличие разделителей '<<->>' в файле.")
-        return False
-
-    logging.info(f"Текст разделен на {len(documents)} чанков.")
+    logging.info(f"Всего подготовлено чанков: {len(documents_all)}")
 
     # --- Создание и сохранение эмбеддингов ---
     logging.info(f"Инициализация OpenAI Embeddings...")
@@ -92,7 +120,7 @@ def create_embeddings():
 
     logging.info(f"Создание новой векторной базы данных в {PERSIST_DIRECTORY}...")
     db = Chroma.from_documents(
-        documents=documents,
+        documents=documents_all,
         embedding=embeddings,
         persist_directory=PERSIST_DIRECTORY
     )
