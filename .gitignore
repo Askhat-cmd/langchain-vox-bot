@@ -26,3 +26,7 @@ cursor_langchain_vox_bot.md
 
 # Backup env
 .env.bak
+
+# Call logs
+*_20??-??-??.txt
+3847228052_2025-08-08.txt
