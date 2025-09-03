@@ -16,19 +16,19 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from Agent import Agent
-from text_normalizer import normalize as normalize_text
-from log_storage import insert_log, query_logs, to_csv, delete_all_logs
-from create_embeddings import recreate_embeddings
+from app.backend.rag.agent import Agent
+from app.backend.utils.text_normalizer import normalize as normalize_text
+from app.backend.services.log_storage import insert_log, query_logs, to_csv, delete_all_logs
+from scripts.create_embeddings import recreate_embeddings
 
 # --- Инициализация ---
 load_dotenv()
 
 # --- Конфигурация логирования ---
 # Создаем директорию для логов, если ее нет
-os.makedirs("logs", exist_ok=True)
+os.makedirs("data/logs", exist_ok=True)
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-log_file = "logs/app.log"
+log_file = "data/logs/app.log"
 
 # Настраиваем ротируемый файловый обработчик
 file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8')
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 app = FastAPI()
-app.mount("/logs-ui", StaticFiles(directory="logs-ui", html=True), name="logs-ui")
+app.mount("/logs-ui", StaticFiles(directory="app/frontend/logs-ui", html=True), name="logs-ui")
 
 
 # --- Вспомогательные функции ---
@@ -62,6 +62,7 @@ def duplicate_headers_without_hashes(text: str) -> str:
 
     processed_text = re.sub(r"^(#{1,6}\s.+)", replacer, text, flags=re.MULTILINE)
     return processed_text
+
 
 def _update_env_file(vars_to_set: Dict[str, str]) -> None:
     env_path = os.path.join(os.getcwd(), ".env")
@@ -98,6 +99,11 @@ class PromptsUpdatePayload(BaseModel):
 class SearchSettingsPayload(BaseModel):
     kb_top_k: int | None = Field(None, ge=1, le=20)
     kb_fallback_threshold: float | None = Field(None, ge=0.0, le=1.0)
+
+class ModelSettingsPayload(BaseModel):
+    llm_model_primary: str | None = Field(None, description="Имя основной модели, например 'gpt-4o-mini'")
+    llm_model_fallback: str | None = Field(None, description="Имя запасной модели")
+    llm_temperature: float | None = Field(None, ge=0.0, le=1.0, description="Температура выборки (0..1)")
 
 class NormalizeRequest(BaseModel):
     text: str
@@ -227,6 +233,9 @@ async def get_search_settings():
     return {
         "kb_top_k": int(os.getenv("KB_TOP_K", "3")),
         "kb_fallback_threshold": float(os.getenv("KB_FALLBACK_THRESHOLD", "0.2")),
+        "llm_model_primary": os.getenv("LLM_MODEL_PRIMARY", "gpt-4o-mini"),
+        "llm_model_fallback": os.getenv("LLM_MODEL_FALLBACK", ""),
+        "llm_temperature": float(os.getenv("LLM_TEMPERATURE", "0.2")),
     }
 
 @app.post("/api/settings", dependencies=[Depends(get_api_key)])
@@ -247,6 +256,29 @@ async def update_search_settings(payload: SearchSettingsPayload):
         return JSONResponse(content={"message": "Настройки сохранены"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Не удалось сохранить настройки: {e}")
+
+
+@app.post("/api/model-settings", dependencies=[Depends(get_api_key)])
+async def update_model_settings(payload: ModelSettingsPayload):
+    try:
+        to_set: Dict[str, str] = {}
+        if payload.llm_model_primary is not None:
+            to_set["LLM_MODEL_PRIMARY"] = payload.llm_model_primary
+            os.environ["LLM_MODEL_PRIMARY"] = payload.llm_model_primary
+        if payload.llm_model_fallback is not None:
+            to_set["LLM_MODEL_FALLBACK"] = payload.llm_model_fallback
+            os.environ["LLM_MODEL_FALLBACK"] = payload.llm_model_fallback
+        if payload.llm_temperature is not None:
+            to_set["LLM_TEMPERATURE"] = str(payload.llm_temperature)
+            os.environ["LLM_TEMPERATURE"] = str(payload.llm_temperature)
+
+        if to_set:
+            _update_env_file(to_set)
+            if agent and hasattr(agent, 'reload'):
+                agent.reload()
+        return JSONResponse(content={"message": "Модельные настройки сохранены"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось сохранить модельные настройки: {e}")
 
 
 @app.post("/api/normalize")
@@ -291,7 +323,7 @@ async def upload_kb(file: UploadFile = File(...)):
         logger.info("Заголовки успешно продублированы.")
 
 
-        backup_dir = "kb_backups"
+        backup_dir = "kb/backups"
         os.makedirs(backup_dir, exist_ok=True)
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
         backup_path = os.path.join(backup_dir, f"knowledge_base_{timestamp}.md.bak")
@@ -347,7 +379,7 @@ async def upload_kb_tech(file: UploadFile = File(...)):
         enriched_content = duplicate_headers_without_hashes(content_text)
         logger.info("[TECH KB] Заголовки успешно продублированы.")
 
-        backup_dir = "kb_backups"
+        backup_dir = "kb/backups"
         os.makedirs(backup_dir, exist_ok=True)
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
         backup_path = os.path.join(backup_dir, f"knowledge_base2_{timestamp}.md.bak")
@@ -425,6 +457,7 @@ async def websocket_endpoint(websocket: WebSocket, callerId: str = Query(None)):
             full_response = ""
             for chunk in response_generator:
                 if chunk:
+                    # Возвращаем прежнее поведение: нормализация только входа; выход шлём как есть
                     await websocket.send_text(chunk)
                     full_response += chunk
 

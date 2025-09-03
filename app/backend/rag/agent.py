@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 class Agent:
     def __init__(self) -> None:
         logger.info("--- Инициализация Агента 'Метротест' ---")
-        self.llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.2, streaming=True)
+        # Текущая LLM и ленивый fallback
+        self.llm = self._create_llm_from_env(primary=True)
+        self.fallback_llm = None
+        self._fallback_chains_built = False
         self.store = {}
         self.last_kb = "general"
         try:
@@ -30,6 +33,19 @@ class Agent:
 
         self._initialize_rag_chain()
         logger.info("--- Агент 'Метротест' успешно инициализирован ---")
+
+    def _create_llm_from_env(self, primary: bool) -> ChatOpenAI:
+        """Создаёт LLM на основе переменных окружения.
+        primary=True → LLM_MODEL_PRIMARY, иначе LLM_MODEL_FALLBACK.
+        """
+        model_env_key = "LLM_MODEL_PRIMARY" if primary else "LLM_MODEL_FALLBACK"
+        model_name = os.getenv(model_env_key, os.getenv("LLM_MODEL_PRIMARY", "gpt-4o-mini"))
+        try:
+            temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+        except ValueError:
+            temperature = 0.2
+        logger.info(f"LLM конфигурация: {'PRIMARY' if primary else 'FALLBACK'} model='{model_name}', temperature={temperature}")
+        return ChatOpenAI(model_name=model_name, temperature=temperature, streaming=True)
 
     def load_prompts(self):
         prompts_file = os.getenv("PROMPTS_FILE_PATH")
@@ -48,17 +64,16 @@ class Agent:
             raise
 
     def _initialize_rag_chain(self):
-        """Инициализирует или перезагружает компоненты RAG."""
+        """Инициализирует/перезагружает векторное хранилище и RAG-цепочки для текущей LLM."""
         logger.info("Инициализация или перезагрузка RAG-цепочки...")
 
         persist_directory = os.getenv("PERSIST_DIRECTORY")
         if not persist_directory:
-             raise ValueError("Переменная окружения PERSIST_DIRECTORY не установлена.")
+            raise ValueError("Переменная окружения PERSIST_DIRECTORY не установлена.")
 
         logger.info(f"Подключение к векторной базе в '{persist_directory}'...")
         embeddings = OpenAIEmbeddings(chunk_size=1000)
         self.db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        # Два ретривера по метаданным, меньший k для скорости
         kb_k = int(os.getenv("KB_TOP_K", "3"))
         self.retriever_general = self.db.as_retriever(
             search_type="similarity", search_kwargs={"k": kb_k, "filter": {"kb": "general"}}
@@ -68,17 +83,25 @@ class Agent:
         )
         logger.info("Подключение к базе данных успешно.")
 
+        # Строим цепочки для текущей LLM
+        self._build_chains_for_llm(self.llm)
+        # Сбросим кэш фолбэка
+        self._fallback_chains_built = False
+        self.fallback_llm = None
+        logger.info("--- RAG-цепочка успешно создана/обновлена ---")
+
+    def _build_chains_for_llm(self, llm: ChatOpenAI):
+        """Строит и сохраняет цепочки для указанной LLM."""
         contextualize_q_prompt = ChatPromptTemplate.from_messages(
             [("system", self.prompts["contextualize_q_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
-        # Историзованные ретриверы для обеих БЗ
-        history_aware_retriever_general = create_history_aware_retriever(self.llm, self.retriever_general, contextualize_q_prompt)
-        history_aware_retriever_tech = create_history_aware_retriever(self.llm, self.retriever_tech, contextualize_q_prompt)
+        history_aware_retriever_general = create_history_aware_retriever(llm, self.retriever_general, contextualize_q_prompt)
+        history_aware_retriever_tech = create_history_aware_retriever(llm, self.retriever_tech, contextualize_q_prompt)
 
         qa_prompt = ChatPromptTemplate.from_messages(
             [("system", self.prompts["qa_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
-        question_answer_chain = create_stuff_documents_chain(self.llm, qa_prompt)
+        question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
 
         rag_chain_general = create_retrieval_chain(history_aware_retriever_general, question_answer_chain)
         rag_chain_tech = create_retrieval_chain(history_aware_retriever_tech, question_answer_chain)
@@ -97,7 +120,6 @@ class Agent:
             history_messages_key="chat_history",
             output_messages_key="answer",
         )
-        logger.info("--- RAG-цепочка успешно создана/обновлена ---")
 
     def _route_kb(self, text: str) -> str:
         """Простая и быстрая маршрутизация: general | tech.
@@ -132,6 +154,8 @@ class Agent:
         logger.info("🔃 Получена команда на перезагрузку агента...")
         try:
             self.prompts = self.load_prompts()
+            # Обновим конфигурацию моделей
+            self.llm = self._create_llm_from_env(primary=True)
             self._initialize_rag_chain()
             logger.info("✅ Агент успешно перезагружен с новой базой знаний и промптами.")
             return True
@@ -161,11 +185,88 @@ class Agent:
                 target = alt
         self.last_kb = target
         logger.info(f"Маршрутизация вопроса в БЗ: {target}")
-        chain = self.conversational_rag_chain_tech if target == "tech" else self.conversational_rag_chain_general
-        stream = chain.stream(
-            {"input": user_question},
-            config={"configurable": {"session_id": session_id}},
-        )
-        for chunk in stream:
-            if 'answer' in chunk:
-                yield chunk['answer']
+        def _stream_with_chain(use_fallback: bool):
+            chain_local = (
+                self.conversational_rag_chain_tech if target == "tech" else self.conversational_rag_chain_general
+            )
+            stream_local = chain_local.stream(
+                {"input": user_question},
+                config={"configurable": {"session_id": session_id}},
+            )
+            for chunk in stream_local:
+                if 'answer' in chunk:
+                    yield chunk['answer']
+
+        def _invoke_non_streaming_with_llm(model_name: str):
+            """Локально построить НЕстриминговые цепочки под указанный model_name и вернуть полный ответ одной строкой."""
+            try:
+                temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+            except ValueError:
+                temperature = 0.2
+            llm_local = ChatOpenAI(model_name=model_name, temperature=temperature, streaming=False)
+
+            contextualize_q_prompt = ChatPromptTemplate.from_messages(
+                [("system", self.prompts["contextualize_q_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
+            )
+            history_aware_retriever_general = create_history_aware_retriever(llm_local, self.retriever_general, contextualize_q_prompt)
+            history_aware_retriever_tech = create_history_aware_retriever(llm_local, self.retriever_tech, contextualize_q_prompt)
+
+            qa_prompt = ChatPromptTemplate.from_messages(
+                [("system", self.prompts["qa_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
+            )
+            question_answer_chain = create_stuff_documents_chain(llm_local, qa_prompt)
+
+            rag_chain_local = create_retrieval_chain(
+                history_aware_retriever_tech if target == "tech" else history_aware_retriever_general,
+                question_answer_chain,
+            )
+            runnable = RunnableWithMessageHistory(
+                rag_chain_local,
+                self.get_session_history,
+                input_messages_key="input",
+                history_messages_key="chat_history",
+                output_messages_key="answer",
+            )
+            result = runnable.invoke(
+                {"input": user_question},
+                config={"configurable": {"session_id": session_id}},
+            )
+            text = result.get("answer", "")
+            if text:
+                yield text
+
+        # Попробуем основной пайплайн; при ошибке — один раз фолбэк на запасную модель
+        try:
+            yield from _stream_with_chain(use_fallback=False)
+        except Exception as e:
+            fb_model = os.getenv("LLM_MODEL_FALLBACK")
+            primary_model = os.getenv("LLM_MODEL_PRIMARY", "gpt-4o-mini")
+            err_text = str(e).lower()
+            # Если стрим запрещён организацией/моделью — попробуем НЕстриминговый режим на основной модели
+            if "unsupported_value" in err_text or "verify organization" in err_text or "param': 'stream" in err_text:
+                logger.warning("Стриминг недоступен для текущей организации/модели → переключаемся на НЕстриминговый режим (PRIMARY)")
+                try:
+                    yield from _invoke_non_streaming_with_llm(primary_model)
+                    return
+                except Exception as e_ns:
+                    logger.error(f"Не удалось выполнить нестриминговый режим на PRIMARY: {e_ns}", exc_info=True)
+            # Если фолбэк определён — попробуем его (стрим), затем НЕстримингово
+            if not fb_model or fb_model == primary_model:
+                logger.error(f"Ошибка генерации (без фолбэка): {e}", exc_info=True)
+                return
+            logger.warning(f"Основная модель упала: {e}. Пытаемся переключиться на FALLBACK '{fb_model}'…")
+            # Построим цепочки для fallback один раз
+            try:
+                if not self._fallback_chains_built:
+                    self.fallback_llm = self._create_llm_from_env(primary=False)
+                    self._build_chains_for_llm(self.fallback_llm)
+                    self._fallback_chains_built = True
+                try:
+                    yield from _stream_with_chain(use_fallback=True)
+                    return
+                except Exception as e_fb_stream:
+                    logger.warning(f"Фолбэк в стриминговом режиме не удался: {e_fb_stream}. Пробуем НЕстримингово…")
+                    yield from _invoke_non_streaming_with_llm(fb_model)
+            except Exception as e2:
+                logger.error(f"Фолбэк модель также не справилась: {e2}", exc_info=True)
+                return

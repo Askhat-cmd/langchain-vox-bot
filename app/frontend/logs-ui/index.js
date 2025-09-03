@@ -154,6 +154,12 @@ th{font-size:.75rem;text-transform:uppercase;color:var(--text-secondary);}
 .success-message, .error { padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; }
 .success-message { background: rgba(16,185,129,.15); color: var(--success); }
 .error { background: rgba(239,68,68,.15); color: var(--danger); }
+
+/* form fields (settings modal) */
+.form-field{display:flex;flex-direction:column;gap:.35rem;margin-bottom:1rem;}
+.form-field .hint{font-size:.8rem;color:var(--text-secondary);}
+.form-inline{display:flex;gap:1rem;flex-wrap:wrap;}
+.form-inline .form-field{flex:1 1 220px;}
 `;
 if (typeof document !== 'undefined' && !document.getElementById('admin-panel-theme')) {
   const styleTag = document.createElement('style');
@@ -434,17 +440,33 @@ const ApiKeyModal = ({ onClose, onSave }) => {
 const SettingsModal = ({ initial, onClose, fetchWithAuth }) => {
     const [k, setK] = useState(initial?.kb_top_k ?? 3);
     const [thr, setThr] = useState(initial?.kb_fallback_threshold ?? 0.2);
+    const [modelPrimary, setModelPrimary] = useState(initial?.llm_model_primary || 'gpt-4o-mini');
+    const [modelFallback, setModelFallback] = useState(initial?.llm_model_fallback || '');
+    const [temperature, setTemperature] = useState(initial?.llm_temperature ?? 0.2);
     const [status, setStatus] = useState('');
     const save = async () => {
         setStatus('Сохранение...');
         try {
-            const res = await fetchWithAuth('/api/settings', {
+            // 1) Поисковые настройки
+            const res1 = await fetchWithAuth('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ kb_top_k: Number(k), kb_fallback_threshold: Number(thr) })
             });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.detail || 'Ошибка сохранения');
+            const data1 = await res1.json();
+            if (!res1.ok) throw new Error(data1.detail || 'Ошибка сохранения (search)');
+            // 2) Модельные настройки
+            const res2 = await fetchWithAuth('/api/model-settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    llm_model_primary: modelPrimary,
+                    llm_model_fallback: modelFallback,
+                    llm_temperature: Number(temperature)
+                })
+            });
+            const data2 = await res2.json();
+            if (!res2.ok) throw new Error(data2.detail || 'Ошибка сохранения (model)');
             setStatus('Настройки сохранены');
             setTimeout(onClose, 800);
         } catch (e) {
@@ -452,17 +474,37 @@ const SettingsModal = ({ initial, onClose, fetchWithAuth }) => {
         }
     };
     return React.createElement('div', { className: 'modal show', onClick: onClose },
-        React.createElement('div', { className: 'modal-content', style:{maxWidth:'520px'}, onClick: e=>e.stopPropagation() },
+        React.createElement('div', { className: 'modal-content', style:{maxWidth:'620px'}, onClick: e=>e.stopPropagation() },
             React.createElement('div', { className: 'modal-header' },
                 React.createElement('h3', null, 'Настройки поиска'),
                 React.createElement('button', { className: 'close-btn', onClick: onClose }, React.createElement(CloseIcon))
             ),
             React.createElement('div', { className: 'modal-body-padding' },
-                React.createElement('label', { className: 'prompt-label' }, 'Сколько документов брать (k)'),
-                React.createElement('input', { type:'number', min:1, max:20, value:k, onChange: e=>setK(e.target.value), className:'search-input', style:{maxWidth:'120px', marginBottom:'1rem'} }),
-                React.createElement('label', { className: 'prompt-label' }, 'Порог уверенности (0..1)'),
-                React.createElement('input', { type:'number', step:'0.05', min:0, max:1, value:thr, onChange: e=>setThr(e.target.value), className:'search-input', style:{maxWidth:'120px'} }),
-                status && React.createElement('div', { style:{marginTop:'1rem', color:'var(--text-secondary)'} }, status)
+                React.createElement('div', { className: 'form-inline' },
+                    React.createElement('div', { className: 'form-field' },
+                        React.createElement('label', { className: 'prompt-label' }, 'Сколько документов брать (k)'),
+                        React.createElement('input', { type:'number', min:1, max:20, value:k, onChange: e=>setK(e.target.value), className:'search-input', style:{maxWidth:'160px'} })
+                    ),
+                    React.createElement('div', { className: 'form-field' },
+                        React.createElement('label', { className: 'prompt-label' }, 'Порог уверенности (0..1)'),
+                        React.createElement('input', { type:'number', step:'0.05', min:0, max:1, value:thr, onChange: e=>setThr(e.target.value), className:'search-input', style:{maxWidth:'160px'} })
+                    )
+                ),
+                React.createElement('div', { className: 'form-field' },
+                    React.createElement('label', { className: 'prompt-label' }, 'Основная модель (PRIMARY)'),
+                    React.createElement('input', { type:'text', value:modelPrimary, onChange: e=>setModelPrimary(e.target.value), className:'search-input', placeholder:'например, gpt-4o-mini' })
+                ),
+                React.createElement('div', { className: 'form-field' },
+                    React.createElement('label', { className: 'prompt-label' }, 'Запасная модель (FALLBACK, опционально)'),
+                    React.createElement('input', { type:'text', value:modelFallback, onChange: e=>setModelFallback(e.target.value), className:'search-input', placeholder:'например, gpt-4o-mini-mini' }),
+                    React.createElement('div', { className:'hint' }, 'Оставьте пустым, если не используете фолбэк')
+                ),
+                React.createElement('div', { className: 'form-field' },
+                    React.createElement('label', { className: 'prompt-label' }, 'Температура (0..1)'),
+                    React.createElement('input', { type:'number', step:'0.05', min:0, max:1, value:temperature, onChange: e=>setTemperature(e.target.value), className:'search-input', style:{maxWidth:'160px'} }),
+                    React.createElement('div', { className:'hint' }, '0 — максимально детерминированный ответ; 0.7–0.9 — более креативный')
+                ),
+                status && React.createElement('div', { style:{marginTop:'0.5rem', color:'var(--text-secondary)'} }, status)
             ),
             React.createElement('div', { className:'actions' },
                 React.createElement('button', { className:'btn btn-secondary', onClick:onClose }, 'Отмена'),
@@ -484,8 +526,10 @@ const HelpModal = ({ onClose }) => {
         React.createElement('h3', null, 'Инструкция по настройке'),
         React.createElement('button', { className:'close-btn', onClick:onClose }, React.createElement(CloseIcon))
       ),
-      React.createElement('div', { className:'modal-body-padding' },
-        React.createElement('pre', { style:{ whiteSpace:'pre-wrap', lineHeight:'1.6' } }, text)
+      React.createElement('div', { className:'modal-body' },
+        React.createElement('div', { className:'modal-body-padding' },
+          React.createElement('pre', { style:{ whiteSpace:'pre-wrap', lineHeight:'1.6' } }, text)
+        )
       ),
       React.createElement('div', { className:'actions' },
         React.createElement('button', { className:'btn', onClick:onClose }, 'Понятно')

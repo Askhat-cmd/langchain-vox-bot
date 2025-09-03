@@ -5,7 +5,7 @@ import aiosqlite, csv, io, json, os
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "log_db.sqlite")
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.getcwd(), "data", "db", "log_db.sqlite"))
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 CREATE_SQL = """
@@ -46,6 +46,8 @@ async def insert_log(log: Dict[str, Any]):
         await db.commit()
 
 async def query_logs(filters: Dict[str, str]) -> List[Dict[str, Any]]:
+    # Гарантируем, что таблица существует перед выборкой
+    await init_db()
     parts = ["SELECT * FROM logs WHERE 1=1"]
     params = []
     
@@ -93,6 +95,7 @@ async def delete_all_logs():
     """
     Удаляет все записи из таблицы логов.
     """
+    await init_db()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM logs")
         await db.commit()

@@ -19,9 +19,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 load_dotenv()
 
 # --- Константы из .env ---
-KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "knowledge_base.md")
-KNOWLEDGE_BASE2_PATH = os.getenv("KNOWLEDGE_BASE2_PATH", "knowledge_base_2.md")
-PERSIST_DIRECTORY = os.getenv("PERSIST_DIRECTORY", "chroma_db_metrotech")
+KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", os.path.join(os.getcwd(), "kb", "general.md"))
+KNOWLEDGE_BASE2_PATH = os.getenv("KNOWLEDGE_BASE2_PATH", os.path.join(os.getcwd(), "kb", "tech.md"))
+PERSIST_DIRECTORY = os.getenv("PERSIST_DIRECTORY", os.path.join(os.getcwd(), "data", "chroma"))
+TMP_DIRECTORY = f"{PERSIST_DIRECTORY}_tmp"
+OLD_DIRECTORY = f"{PERSIST_DIRECTORY}_old"
 
 # Санитизация ключа на случай переносов строк/пробелов
 sanitized_key = (os.getenv("OPENAI_API_KEY") or "").strip()
@@ -113,18 +115,45 @@ def create_embeddings():
     logging.info(f"Инициализация OpenAI Embeddings...")
     embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
 
-    # Если директория для ChromaDB уже существует, удаляем ее для полного обновления
-    if os.path.exists(PERSIST_DIRECTORY):
-        logging.info(f"Удаление старой базы данных из директории: {PERSIST_DIRECTORY}")
-        shutil.rmtree(PERSIST_DIRECTORY)
+    # Атомарная пересборка:
+    # 1) строим новую БД в TMP_DIRECTORY
+    # 2) переименовываем старую в OLD_DIRECTORY
+    # 3) переименовываем TMP_DIRECTORY -> PERSIST_DIRECTORY (атомарно на одном FS)
+    # 4) удаляем OLD_DIRECTORY
 
-    logging.info(f"Создание новой векторной базы данных в {PERSIST_DIRECTORY}...")
+    # Чистим возможные артефакты прошлых запусков
+    if os.path.exists(TMP_DIRECTORY):
+        logging.info(f"Удаление прежней временной директории: {TMP_DIRECTORY}")
+        shutil.rmtree(TMP_DIRECTORY, ignore_errors=True)
+    if os.path.exists(OLD_DIRECTORY):
+        logging.info(f"Удаление старого бэкапа директории: {OLD_DIRECTORY}")
+        shutil.rmtree(OLD_DIRECTORY, ignore_errors=True)
+
+    logging.info(f"Создание новой векторной базы данных во временной директории {TMP_DIRECTORY}...")
     db = Chroma.from_documents(
         documents=documents_all,
         embedding=embeddings,
-        persist_directory=PERSIST_DIRECTORY
+        persist_directory=TMP_DIRECTORY
     )
-    logging.info("Векторная база данных успешно создана и сохранена.")
+    # Явно фиксируем на диск перед свопом
+    try:
+        db.persist()
+    except Exception:
+        # некоторые версии уже делают persist() внутри
+        pass
+
+    # Своп директорий
+    if os.path.exists(PERSIST_DIRECTORY):
+        logging.info(f"Переименование текущей БД → бэкап: {PERSIST_DIRECTORY} → {OLD_DIRECTORY}")
+        os.replace(PERSIST_DIRECTORY, OLD_DIRECTORY)
+    logging.info(f"Атомарная подмена новой БД: {TMP_DIRECTORY} → {PERSIST_DIRECTORY}")
+    os.replace(TMP_DIRECTORY, PERSIST_DIRECTORY)
+    # Удаляем бэкап (если хотим хранить — можно закомментировать)
+    if os.path.exists(OLD_DIRECTORY):
+        logging.info(f"Удаление бэкапа старой БД: {OLD_DIRECTORY}")
+        shutil.rmtree(OLD_DIRECTORY, ignore_errors=True)
+
+    logging.info("Векторная база данных успешно создана и атомарно подменена.")
     return True
 
 
