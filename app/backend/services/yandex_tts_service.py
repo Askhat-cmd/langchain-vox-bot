@@ -19,13 +19,11 @@ sys.path.append(current_dir)
 try:
     from yandex.cloud.ai.tts.v3 import tts_service_pb2_grpc
     from yandex.cloud.ai.tts.v3 import tts_pb2
-    # UtteranceSynthesisRequest находится в tts_pb2, а не в tts_service_pb2
-    UtteranceSynthesisRequest = tts_pb2.UtteranceSynthesisRequest
-    AudioFormatOptions = tts_pb2.AudioFormatOptions
-    ContainerAudio = tts_pb2.ContainerAudio
+    # ИСПРАВЛЕНО: Все классы находятся в tts_pb2
     GRPC_AVAILABLE = True
     logger = logging.getLogger(__name__)
     logger.info("✅ gRPC модули для Yandex TTS загружены")
+    logger.info(f"📋 Доступные классы: {[x for x in dir(tts_pb2) if 'utterance' in x.lower()]}")
 except ImportError as e:
     GRPC_AVAILABLE = False
     logger = logging.getLogger(__name__)
@@ -130,7 +128,7 @@ class YandexTTSService:
                 text=text,
                 output_audio_spec=tts_pb2.AudioFormatOptions(
                     container_audio=tts_pb2.ContainerAudio(
-                        container_audio_type=tts_pb2.ContainerAudio.WAV
+                        container_audio_type=tts_pb2.ContainerAudio.ContainerAudioType.WAV
                     )
                 ),
                 hints=[
@@ -139,11 +137,14 @@ class YandexTTSService:
                         speed=1.2      # Ускоренная речь
                     )
                 ],
-                loudness_normalization_type=tts_pb2.UtteranceSynthesisRequest.LUFS
+                loudness_normalization_type=tts_pb2.UtteranceSynthesisRequest.LoudnessNormalizationType.LUFS
             )
             
             # Выполняем gRPC streaming запрос
-            metadata = [('authorization', f'Bearer {iam_token}')]
+            metadata = [
+                ('authorization', f'Bearer {iam_token}'),
+                ('x-folder-id', self.folder_id)  # ИСПРАВЛЕНО: добавляем folder_id
+            ]
             
             logger.info(f"🚀 gRPC TTS запрос: {text[:50]}...")
             

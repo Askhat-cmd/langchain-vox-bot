@@ -2,7 +2,6 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_history_aware_retriever
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -13,6 +12,82 @@ import os
 import redis
 import hashlib
 import time
+from typing import List
+
+class CachedOpenAIEmbeddings(OpenAIEmbeddings):
+    """Кешированные OpenAI Embeddings для ускорения повторных запросов"""
+    
+    def __init__(self, redis_client, **kwargs):
+        super().__init__(**kwargs)
+        # Используем объект для хранения кеш-данных
+        self._cache_data = {
+            'redis_client': redis_client,
+            'cache_prefix': "embedding_cache:",
+            'cache_ttl': 3600 * 24 * 7  # 7 дней
+        }
+        
+    def _get_cache_key(self, text: str) -> str:
+        """Генерирует ключ кеша для текста"""
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        return f"{self._cache_data['cache_prefix']}{text_hash}"
+    
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Кешированное создание embeddings для документов"""
+        results = []
+        texts_to_embed = []
+        text_indices = []
+        
+        # Проверяем кеш для каждого текста
+        for i, text in enumerate(texts):
+            cache_key = self._get_cache_key(text)
+            cached_embedding = self._cache_data['redis_client'].get(cache_key)
+            
+            if cached_embedding:
+                # Восстанавливаем embedding из кеша
+                embedding = json.loads(cached_embedding)
+                results.append(embedding)
+                logger.debug(f"✅ Embedding из кеша для текста {i}")
+            else:
+                # Добавляем в список для создания embedding
+                texts_to_embed.append(text)
+                text_indices.append(i)
+                results.append(None)  # Заглушка
+        
+        # Создаем embeddings для текстов, которых нет в кеше
+        if texts_to_embed:
+            logger.info(f"🔄 Создаем {len(texts_to_embed)} новых embeddings")
+            new_embeddings = super().embed_documents(texts_to_embed)
+            
+            # Сохраняем в кеш и заполняем результаты
+            for i, (text, embedding) in enumerate(zip(texts_to_embed, new_embeddings)):
+                cache_key = self._get_cache_key(text)
+                self._cache_data['redis_client'].setex(cache_key, self._cache_data['cache_ttl'], json.dumps(embedding))
+                
+                # Заполняем результат
+                original_index = text_indices[i]
+                results[original_index] = embedding
+                logger.debug(f"💾 Сохранен в кеш embedding для текста {original_index}")
+        
+        return results
+    
+    def embed_query(self, text: str) -> List[float]:
+        """Кешированное создание embedding для запроса"""
+        cache_key = self._get_cache_key(text)
+        cached_embedding = self._cache_data['redis_client'].get(cache_key)
+        
+        if cached_embedding:
+            logger.debug("✅ Embedding запроса из кеша")
+            return json.loads(cached_embedding)
+        
+        # Создаем новый embedding
+        logger.debug("🔄 Создаем новый embedding для запроса")
+        embedding = super().embed_query(text)
+        
+        # Сохраняем в кеш
+        self._cache_data['redis_client'].setex(cache_key, self._cache_data['cache_ttl'], json.dumps(embedding))
+        logger.debug("💾 Сохранен в кеш embedding запроса")
+        
+        return embedding
 
 load_dotenv()
 
@@ -97,7 +172,13 @@ class Agent:
         except ValueError:
             temperature = 0.2
         logger.info(f"LLM конфигурация: {'PRIMARY' if primary else 'FALLBACK'} model='{model_name}', temperature={temperature}")
-        return ChatOpenAI(model_name=model_name, temperature=temperature, streaming=True)
+        return ChatOpenAI(
+            model_name=model_name, 
+            temperature=temperature, 
+            streaming=True,
+            request_timeout=15,  # ОПТИМИЗАЦИЯ: агрессивный timeout для запросов
+            max_retries=1        # ОПТИМИЗАЦИЯ: минимум повторов
+        )
 
     def load_prompts(self):
         prompts_file = os.getenv("PROMPTS_FILE_PATH")
@@ -124,7 +205,18 @@ class Agent:
             raise ValueError("Переменная окружения PERSIST_DIRECTORY не установлена.")
 
         logger.info(f"Подключение к векторной базе в '{persist_directory}'...")
-        embeddings = OpenAIEmbeddings(chunk_size=1000)
+        
+        # ОПТИМИЗАЦИЯ: Создаем кешированные embeddings
+        if self.cache_enabled:
+            embeddings = CachedOpenAIEmbeddings(
+                redis_client=self.redis_client,
+                chunk_size=1000
+            )
+            logger.info("✅ Используем кешированные embeddings")
+        else:
+            embeddings = OpenAIEmbeddings(chunk_size=1000)
+            logger.info("⚠️ Используем обычные embeddings (кеширование недоступно)")
+            
         self.db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
         kb_k = int(os.getenv("KB_TOP_K", "3"))
         self.retriever_general = self.db.as_retriever(
@@ -144,19 +236,18 @@ class Agent:
 
     def _build_chains_for_llm(self, llm: ChatOpenAI):
         """Строит и сохраняет цепочки для указанной LLM."""
-        contextualize_q_prompt = ChatPromptTemplate.from_messages(
-            [("system", self.prompts["contextualize_q_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
-        )
-        history_aware_retriever_general = create_history_aware_retriever(llm, self.retriever_general, contextualize_q_prompt)
-        history_aware_retriever_tech = create_history_aware_retriever(llm, self.retriever_tech, contextualize_q_prompt)
-
+        # ОПТИМИЗАЦИЯ: Убираем history_aware_retriever для ускорения
+        # Вместо дополнительного LLM запроса для контекстуализации, используем простые retriever'ы
+        logger.info("🚀 ОПТИМИЗАЦИЯ: Используем простые retriever'ы без history_aware для ускорения")
+        
         qa_prompt = ChatPromptTemplate.from_messages(
             [("system", self.prompts["qa_system_prompt"]), MessagesPlaceholder("chat_history"), ("human", "{input}")]
         )
         question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
 
-        rag_chain_general = create_retrieval_chain(history_aware_retriever_general, question_answer_chain)
-        rag_chain_tech = create_retrieval_chain(history_aware_retriever_tech, question_answer_chain)
+        # Используем простые retriever'ы вместо history_aware
+        rag_chain_general = create_retrieval_chain(self.retriever_general, question_answer_chain)
+        rag_chain_tech = create_retrieval_chain(self.retriever_tech, question_answer_chain)
 
         self.conversational_rag_chain_general = RunnableWithMessageHistory(
             rag_chain_general,

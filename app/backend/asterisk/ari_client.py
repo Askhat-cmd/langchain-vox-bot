@@ -40,8 +40,8 @@ class AsteriskARIClient:
         """
         try:
             url = f"{self.base_url}/channels/{channel_id}/play"
-            # Формат: sound:lang/filename или sound:filename
-            media = f"sound:{lang}/{sound_id}" if lang else f"sound:{sound_id}"
+            # Формат: sound:ru/filename (указываем папку языка)
+            media = f"sound:ru/{sound_id}"
             data = {"media": media}
             
             logger.info(f"Проигрываем звук: {media} на канале {channel_id}")
