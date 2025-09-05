@@ -37,7 +37,7 @@ class YandexTTSService:
         """Инициализация сверхбыстрого Yandex TTS с gRPC streaming"""
         self.oauth_token = os.getenv("OAUTH_TOKEN")  # Используем OAUTH_TOKEN из .env
         self.folder_id = os.getenv("YANDEX_FOLDER_ID")
-        self.asterisk_sounds_dir = "/usr/share/asterisk/sounds/ru"
+        self.asterisk_sounds_dir = "/var/lib/asterisk/sounds/ru"
         
         # Кеш для коротких фраз (до 100 символов)
         self.tts_cache = {}

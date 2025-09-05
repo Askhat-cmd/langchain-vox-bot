@@ -25,7 +25,7 @@ class TTSService:
         self.model = os.getenv("TTS_MODEL", "tts-1")  # tts-1 или tts-1-hd
         self.audio_dir = os.getenv("TTS_AUDIO_DIR", "data/audio")
         # Используем стандартный путь Asterisk для звуков
-        self.asterisk_sounds_dir = "/usr/share/asterisk/sounds/ru"
+        self.asterisk_sounds_dir = "/var/lib/asterisk/sounds/ru"
         
         # Создаем директории для аудио файлов
         os.makedirs(self.audio_dir, exist_ok=True)
