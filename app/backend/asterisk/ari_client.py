@@ -29,19 +29,19 @@ class AsteriskARIClient:
             logger.error(f"Error answering channel {channel_id}: {e}")
             return False
     
-    async def play_sound(self, channel_id, sound_id, lang="ru"):
+    async def play_sound(self, channel_id, sound_id, lang: Optional[str] = None):
         """
         Проигрывает звуковой файл на канале.
-        
+
         Args:
             channel_id: ID канала
             sound_id: Имя звукового файла (без расширения)
-            lang: Язык (папка в sounds/)
+            lang: Язык (папка в sounds/). ``None`` — использовать язык канала
         """
         try:
             url = f"{self.base_url}/channels/{channel_id}/play"
-            # Формат: sound:ru/filename (указываем папку языка)
-            media = f"sound:ru/{sound_id}"
+            # Формат: sound:<lang>/filename или sound:filename если язык не указан
+            media = f"sound:{lang}/{sound_id}" if lang else f"sound:{sound_id}"
             data = {"media": media}
             
             logger.info(f"Проигрываем звук: {media} на канале {channel_id}")
