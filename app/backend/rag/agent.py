@@ -3,13 +3,16 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_history_aware_retriever
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from dotenv import load_dotenv
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 import logging
 import json
 import os
+import redis
+import hashlib
+import time
 
 load_dotenv()
 
@@ -24,6 +27,17 @@ class Agent:
         self._fallback_chains_built = False
         self.store = {}
         self.last_kb = "general"
+        
+        # НОВОЕ: Redis кеширование для embeddings
+        try:
+            self.redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+            self.redis_client.ping()  # проверяем соединение
+            self.cache_enabled = True
+            logger.info("✅ Redis кеширование включено")
+        except Exception as e:
+            self.redis_client = None
+            self.cache_enabled = False
+            logger.warning(f"⚠️ Redis недоступен, кеширование отключено: {e}")
         try:
             self.prompts = self.load_prompts()
         except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
@@ -33,6 +47,44 @@ class Agent:
 
         self._initialize_rag_chain()
         logger.info("--- Агент 'Метротест' успешно инициализирован ---")
+
+    def _get_cache_key(self, text: str, kb: str) -> str:
+        """Генерирует ключ кеша для embedding запроса."""
+        combined = f"{text}:{kb}:{self.last_kb}"
+        return f"emb:{hashlib.md5(combined.encode()).hexdigest()}"
+    
+    def _get_cached_documents(self, text: str, kb: str):
+        """Получает кешированные документы из Redis."""
+        if not self.cache_enabled:
+            return None
+        
+        cache_key = self._get_cache_key(text, kb)
+        try:
+            cached = self.redis_client.get(cache_key)
+            if cached:
+                logger.info(f"🎯 КЕШИРОВАНИЕ: Используем кешированный поиск для: {text[:30]}...")
+                return json.loads(cached)
+        except Exception as e:
+            logger.debug(f"Ошибка чтения кеша: {e}")
+        return None
+    
+    def _cache_documents(self, text: str, kb: str, documents):
+        """Кеширует результаты поиска в Redis."""
+        if not self.cache_enabled or not documents:
+            return
+            
+        cache_key = self._get_cache_key(text, kb)
+        try:
+            # Кешируем на 1 час
+            doc_contents = [{"content": doc.page_content, "metadata": doc.metadata} for doc in documents]
+            self.redis_client.setex(
+                cache_key, 
+                3600,  # 1 час TTL
+                json.dumps(doc_contents)
+            )
+            logger.debug(f"📦 КЕШИРОВАНИЕ: Сохранили {len(documents)} документов в кеш")
+        except Exception as e:
+            logger.debug(f"Ошибка записи в кеш: {e}")
 
     def _create_llm_from_env(self, primary: bool) -> ChatOpenAI:
         """Создаёт LLM на основе переменных окружения.
@@ -137,17 +189,8 @@ class Agent:
             return "tech"
         return "general"
 
-    def _max_relevance(self, question: str, kb: str, k: int) -> float:
-        try:
-            # Для оценки порога берём релевантность напрямую из векторного стора
-            res = self.db.similarity_search_with_relevance_scores(
-                question, k=k, filter={"kb": kb}
-            )
-            if not res:
-                return 0.0
-            return max(score for _, score in res)
-        except Exception:
-            return 1.0  # если стор не вернул оценку, не триггерим фолбэк
+# УДАЛЕНА МЕДЛЕННАЯ ФУНКЦИЯ _max_relevance() - она тратила 6.4 секунды!
+    # Эта функция отсутствовала в быстрой Voximplant версии
 
     def reload(self):
         """Перезагружает промпты, векторную базу данных и RAG-цепочку."""
@@ -169,33 +212,59 @@ class Agent:
         return self.store[session_id]
 
     def get_response_generator(self, user_question: str, session_id: str):
+        import time
+        start_time = time.time()
+        logger.info(f"🕐 ПРОФИЛИРОВАНИЕ: Начало get_response_generator для вопроса: '{user_question[:50]}...'")
+        
+        # УПРОЩЕННАЯ маршрутизация (как в Voximplant версии)
+        route_start = time.time()
         target = self._route_kb(user_question)
-        # Порог и k берём из env (по умолчанию 0.2 и 3)
-        threshold = float(os.getenv("KB_FALLBACK_THRESHOLD", "0.2"))
-        k = int(os.getenv("KB_TOP_K", "3"))
-        # Оценим релевантность выбранной БЗ; при низкой — попробуем вторую
-        max_score = self._max_relevance(user_question, target, k)
-        alt = "tech" if target == "general" else "general"
-        if max_score < threshold:
-            alt_score = self._max_relevance(user_question, alt, k)
-            if alt_score > max_score:
-                logger.info(
-                    f"Низкая релевантность ({max_score:.2f}) для {target} → переключаемся на {alt} ({alt_score:.2f})"
-                )
-                target = alt
+        route_time = time.time() - route_start
+        logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ: Маршрутизация заняла {route_time:.3f}с")
+        
+        # УБИРАЕМ МЕДЛЕННУЮ ОЦЕНКУ РЕЛЕВАНТНОСТИ!
+        # Была: max_score = self._max_relevance() - 6.4 секунды!
+        # Теперь: просто используем результат маршрутизации
+        
         self.last_kb = target
         logger.info(f"Маршрутизация вопроса в БЗ: {target}")
+        
+        setup_time = time.time() - start_time
+        logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ: Общая подготовка заняла {setup_time:.3f}с")
         def _stream_with_chain(use_fallback: bool):
+            import time
+            stream_start = time.time()
+            logger.info(f"🔄 ПРОФИЛИРОВАНИЕ: Начинаем streaming с {'FALLBACK' if use_fallback else 'PRIMARY'} моделью")
+            
             chain_local = (
                 self.conversational_rag_chain_tech if target == "tech" else self.conversational_rag_chain_general
             )
+            
+            chain_setup_time = time.time() - stream_start
+            logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ: Подготовка цепочки заняла {chain_setup_time:.3f}с")
+            
+            stream_call_start = time.time()
             stream_local = chain_local.stream(
                 {"input": user_question},
                 config={"configurable": {"session_id": session_id}},
             )
+            stream_call_time = time.time() - stream_call_start
+            logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ: Вызов stream() занял {stream_call_time:.3f}с")
+            
+            first_chunk = True
+            chunk_count = 0
             for chunk in stream_local:
+                if first_chunk:
+                    first_chunk_time = time.time() - stream_start
+                    logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ: Первый чанк получен через {first_chunk_time:.3f}с")
+                    first_chunk = False
+                
                 if 'answer' in chunk:
+                    chunk_count += 1
                     yield chunk['answer']
+            
+            total_stream_time = time.time() - stream_start
+            logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ: Весь streaming занял {total_stream_time:.3f}с, чанков: {chunk_count}")
 
         def _invoke_non_streaming_with_llm(model_name: str):
             """Локально построить НЕстриминговые цепочки под указанный model_name и вернуть полный ответ одной строкой."""
