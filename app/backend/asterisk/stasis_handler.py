@@ -246,11 +246,23 @@ class AsteriskAIHandler:
                 timestamp = datetime.now().strftime('%H%M%S%f')[:-3]  # миллисекунды
                 audio_filename = f"stream_{channel_id}_{timestamp}"
                 sound_filename = await self.tts.text_to_speech(text, audio_filename)
-            
+
+            if not sound_filename:
+                logger.error("❌ Не удалось сгенерировать TTS")
+                await self.finish_speak_one(channel_id)
+                return
+
+            sound_path = os.path.join("/var/lib/asterisk/sounds/ru", f"{sound_filename}.wav")
+
+            if not os.path.exists(sound_path) or os.path.getsize(sound_path) == 0:
+                logger.error(f"❌ Файл TTS отсутствует или пуст: {sound_path}")
+                await self.finish_speak_one(channel_id)
+                return
+
             # Проигрывание через Asterisk
             async with AsteriskARIClient() as ari:
                 playback_id = await ari.play_sound(channel_id, sound_filename, lang=None)
-                
+
                 if playback_id:
                     call_data["current_playback"] = playback_id
                     logger.info(f"✅ TTS запущен: {playback_id}")
