@@ -172,7 +172,22 @@ class YandexTTSService:
             with open(wav_path, "wb") as f:
                 f.write(audio_data)
             
-            logger.info(f"⚡ gRPC TTS готов за рекордное время: {wav_filename}")
+            # ИСПРАВЛЕНО: Конвертируем в телефонную частоту 8000 Hz для Asterisk
+            temp_path = wav_path + ".temp"
+            sox_cmd = [
+                "sox", "-t", "wav", wav_path, "-r", "8000", "-c", "1", "-e", "signed-integer", "-b", "16", "-t", "wav", temp_path
+            ]
+            
+            try:
+                subprocess.run(sox_cmd, check=True, capture_output=True)
+                # Заменяем оригинальный файл конвертированным
+                os.replace(temp_path, wav_path)
+                logger.info(f"⚡ gRPC TTS готов за рекордное время (8000 Hz): {wav_filename}")
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"⚠️ Не удалось конвертировать в 8000 Hz: {e}")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                logger.info(f"⚡ gRPC TTS готов (оригинальная частота): {wav_filename}")
             
             # Кешируем короткие фразы
             if len(text) < 100:

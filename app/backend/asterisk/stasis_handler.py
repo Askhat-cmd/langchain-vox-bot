@@ -15,7 +15,7 @@ current_dir = Path(__file__).parent
 project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from ari_client import AsteriskARIClient
+from app.backend.asterisk.ari_client import AsteriskARIClient
 from app.backend.rag.agent import Agent
 from app.backend.services.yandex_tts_service import get_yandex_tts_service
 from app.backend.services.asr_service import get_asr_service
