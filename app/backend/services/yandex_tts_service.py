@@ -12,6 +12,8 @@ import logging
 import asyncio
 from typing import Optional
 
+import aiohttp
+
 # Добавляем путь к gRPC файлам
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -29,8 +31,6 @@ except ImportError as e:
     logger = logging.getLogger(__name__)
     logger.warning(f"⚠️ gRPC модули недоступны: {e}")
     logger.info("🔄 Будет использоваться HTTP API")
-    # Fallback на HTTP API
-    import requests
 
 class YandexTTSService:
     def __init__(self):
@@ -81,30 +81,30 @@ class YandexTTSService:
             self.grpc_channel = None
             self.tts_stub = None
     
-    def _get_fresh_iam_token(self) -> str:
+    async def _get_fresh_iam_token(self) -> str:
         """Получение свежего IAM токена из OAuth токена с кешированием"""
         import time
-        import requests
-        
+
         # Проверяем, не истек ли токен (12 часов = 43200 сек, обновляем за час до истечения)
         if self.iam_token and time.time() < (self.iam_token_expires - 3600):
             return self.iam_token
-        
+
         url = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
         headers = {"Content-Type": "application/json"}
         data = {"yandexPassportOauthToken": self.oauth_token}
-        
+
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=5)
-            response.raise_for_status()
-            
-            token_data = response.json()
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=data) as response:
+                    response.raise_for_status()
+                    token_data = await response.json()
+
             self.iam_token = token_data["iamToken"]
-            
+
             # Токен действует 12 часов
-            import time
             self.iam_token_expires = time.time() + 43200
-            
+
             logger.info("🔑 IAM токен обновлен")
             return self.iam_token
         except Exception as e:
@@ -121,7 +121,7 @@ class YandexTTSService:
         
         try:
             # Получаем свежий IAM токен
-            iam_token = self._get_fresh_iam_token()
+            iam_token = await self._get_fresh_iam_token()
             
             # Создаем запрос для gRPC streaming (ИСПРАВЛЕН ИМПОРТ!)
             request = tts_pb2.UtteranceSynthesisRequest(
@@ -179,22 +179,22 @@ class YandexTTSService:
             ]
             
             try:
-                subprocess.run(sox_cmd, check=True, capture_output=True)
+                await asyncio.to_thread(subprocess.run, sox_cmd, check=True, capture_output=True)
                 # Удаляем оригинальный WAV файл
                 os.remove(wav_path)
-                
+
                 # ИСПРАВЛЕНО: Устанавливаем правильные права доступа для Asterisk
-                subprocess.run(["chown", "asterisk:asterisk", gsm_path], check=True)
-                subprocess.run(["chmod", "644", gsm_path], check=True)
+                await asyncio.to_thread(subprocess.run, ["chown", "asterisk:asterisk", gsm_path], check=True)
+                await asyncio.to_thread(subprocess.run, ["chmod", "644", gsm_path], check=True)
                 logger.info(f"✅ Права доступа установлены: asterisk:asterisk 644")
-                
+
                 logger.info(f"⚡ gRPC TTS готов за рекордное время (GSM): {os.path.basename(gsm_path)}")
                 # Возвращаем путь к GSM файлу
                 wav_path = gsm_path
             except subprocess.CalledProcessError as e:
                 logger.warning(f"⚠️ Не удалось конвертировать в GSM: {e}")
                 # Оставляем оригинальный WAV файл как fallback
-                subprocess.run(["chown", "asterisk:asterisk", wav_path], check=True)
+                await asyncio.to_thread(subprocess.run, ["chown", "asterisk:asterisk", wav_path], check=True)
                 logger.info(f"⚡ gRPC TTS готов (WAV fallback): {wav_filename}")
             
                 # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отключаем кеширование для диагностики
@@ -217,11 +217,9 @@ class YandexTTSService:
         """
         Fallback HTTP API для синтеза речи
         """
-        import requests
-        
         try:
             # Получаем свежий IAM токен
-            iam_token = self._get_fresh_iam_token()
+            iam_token = await self._get_fresh_iam_token()
             
             # Настройки для оптимальной скорости
             url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
@@ -241,16 +239,19 @@ class YandexTTSService:
             logger.info(f"🎤 HTTP TTS запрос: {text[:50]}...")
             
             # Выполняем запрос к TTS API
-            response = requests.post(url, headers=headers, data=data, timeout=10)
-            response.raise_for_status()
-            
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, data=data) as response:
+                    response.raise_for_status()
+                    audio_content = await response.read()
+
             # Сохраняем raw LPCM данные
             cache_key = hashlib.md5(text.encode()).hexdigest()
             raw_filename = f"{filename_prefix}_{cache_key}.raw"
             raw_path = os.path.join("/tmp", raw_filename)
-            
+
             with open(raw_path, "wb") as f:
-                f.write(response.content)
+                f.write(audio_content)
             
             # ВОССТАНОВЛЕНО: Оригинальная sox конвертация из архивной версии
             wav_filename = f"{filename_prefix}_{cache_key}.wav"
@@ -262,7 +263,7 @@ class YandexTTSService:
                 raw_path, "-t", "wav", wav_path
             ]
             
-            subprocess.run(sox_cmd, check=True, capture_output=True)
+            await asyncio.to_thread(subprocess.run, sox_cmd, check=True, capture_output=True)
             
             # Удаляем временный raw файл
             os.remove(raw_path)
