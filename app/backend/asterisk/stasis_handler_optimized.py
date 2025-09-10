@@ -404,39 +404,18 @@ class OptimizedAsteriskAIHandler:
                 # Fallback на старый метод
                 await self.speak_queued(channel_id, text)
                 return
-            
-            # ВРЕМЕННО: Используем оригинальный TTS для тестирования
-            # TODO: Вернуться к TTS Adapter после исправления формата
-            logger.info("🔄 ВРЕМЕННО: Используем оригинальный TTS для тестирования")
-            
-            # Используем оригинальный TTS сервис
-            from app.backend.services.yandex_tts_service import get_yandex_tts_service
-            original_tts = get_yandex_tts_service()
-            
-            # Создаем файл через оригинальный TTS
-            timestamp = datetime.now().strftime('%H%M%S%f')[:-3]
-            audio_filename = f"stream_{channel_id}_{timestamp}"
-            sound_filename = await original_tts.text_to_speech(text, audio_filename)
-            
-            if sound_filename:
-                # Воспроизводим через ARI (как в оригинале)
-                async with AsteriskARIClient() as ari:
-                    playback_id = await ari.play_sound(channel_id, sound_filename, lang=None)
-                    
-                    if playback_id:
-                        # Обновляем данные канала
-                        if channel_id in self.active_calls:
-                            call_data = self.active_calls[channel_id]
-                            call_data["current_playback"] = playback_id
-                            call_data["is_speaking"] = True
-                            call_data["last_speak_started_at"] = int(time.time() * 1000)
-                        
-                        logger.info(f"✅ Аудио воспроизводится через ARI: {playback_id}")
-                    else:
-                        logger.warning("⚠️ ARI playback не удался")
-            else:
-                logger.warning("Оригинальный TTS не вернул имя файла")
-                
+
+            # Синтезируем аудио через адаптер
+            audio_data = await self.tts_adapter.synthesize(text)
+
+            if not audio_data:
+                logger.warning("⚠️ TTS Adapter вернул пустые данные")
+                await self.speak_queued(channel_id, text)
+                return
+
+            # Воспроизводим аудио данные
+            await self._play_audio_data(channel_id, audio_data)
+
         except Exception as e:
             logger.error(f"❌ Optimized speak error: {e}")
             # Fallback на старый метод
