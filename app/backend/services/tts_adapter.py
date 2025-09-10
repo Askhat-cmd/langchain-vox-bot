@@ -86,35 +86,44 @@ class TTSAdapter:
     
     async def _http_fallback(self, text: str) -> bytes:
         """Fallback на HTTP TTS"""
+        import os
+
+        temp_dir = os.path.join(self.http_tts.asterisk_sounds_dir, "fallback_tmp")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        original_dir = self.http_tts.asterisk_sounds_dir
+        self.http_tts.asterisk_sounds_dir = temp_dir
+
         try:
-            # Используем существующий HTTP TTS сервис
-            # Создаем временный файл для получения аудио данных
-            import tempfile
-            import os
-            
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            # Генерируем аудио через HTTP TTS
             result = await self.http_tts.text_to_speech(text, "fallback")
-            
             if result:
-                # Читаем сгенерированный файл
-                wav_path = os.path.join(self.http_tts.asterisk_sounds_dir, f"{result}.wav")
+                wav_path = os.path.join(temp_dir, f"{result}.wav")
                 if os.path.exists(wav_path):
-                    with open(wav_path, 'rb') as f:
-                        audio_data = f.read()
-                    
-                    # Удаляем временный файл
-                    os.unlink(wav_path)
+                    try:
+                        with open(wav_path, 'rb') as f:
+                            audio_data = f.read()
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось прочитать файл {wav_path}: {e}")
+                        return b""
+
+                    try:
+                        os.remove(wav_path)
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось удалить временный файл {wav_path}: {e}")
+                    else:
+                        if os.path.exists(wav_path):
+                            logger.warning(f"⚠️ Временный файл не удалён: {wav_path}")
                     return audio_data
-            
-            logger.error("❌ HTTP TTS fallback failed")
+                else:
+                    logger.error(f"❌ Сгенерированный файл не найден: {wav_path}")
+            else:
+                logger.error("❌ HTTP TTS не вернул результат")
             return b""
-            
         except Exception as e:
             logger.error(f"❌ HTTP TTS fallback error: {e}")
             return b""
+        finally:
+            self.http_tts.asterisk_sounds_dir = original_dir
     
     async def _check_grpc_health(self):
         """Проверка здоровья gRPC соединения"""
