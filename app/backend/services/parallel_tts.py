@@ -84,7 +84,7 @@ class ParallelTTSProcessor:
         
         try:
             # gRPC TTS (параллельно с другими чанками)
-            audio_data = await self.grpc_tts.synthesize_chunk_fast(text)
+            audio_data = await self.grpc_tts.synthesize(text)
             tts_time = time.time() - tts_start
             
             logger.info(f"✅ TTS done for chunk {chunk_num}: {tts_time:.2f}s")
