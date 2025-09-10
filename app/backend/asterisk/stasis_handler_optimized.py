@@ -105,7 +105,11 @@ class OptimizedAsteriskAIHandler:
             
             # 4. Parallel TTS Processor
             ari_client = AsteriskARIClient()
-            self.parallel_tts = ParallelTTSProcessor(self.tts_adapter, ari_client)
+            # передаем адаптер с методом synthesize
+            self.parallel_tts = ParallelTTSProcessor(
+                grpc_tts=self.tts_adapter,
+                ari_client=ari_client
+            )
             
             logger.info("✅ Все сервисы оптимизации инициализированы")
             
