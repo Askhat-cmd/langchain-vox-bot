@@ -11,6 +11,8 @@ import time
 import logging
 from typing import Optional
 
+import aiohttp
+
 # Добавляем путь к gRPC файлам
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -74,33 +76,41 @@ class YandexGrpcTTS:
             logger.error(f"❌ gRPC TTS initialization failed: {e}")
             raise
     
-    def _get_fresh_iam_token(self) -> str:
-        """Получение свежего IAM токена с кешированием"""
-        import requests
-        
+    async def _get_fresh_iam_token(self) -> str:
+        """Получение свежего IAM токена с кешированием."""
+
         # Проверяем, не истек ли токен (12 часов = 43200 сек, обновляем за час до истечения)
         if self.iam_token and time.time() < (self.iam_token_expires - 3600):
             return self.iam_token
-        
+
         url = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
         headers = {"Content-Type": "application/json"}
         data = {"yandexPassportOauthToken": self.api_key}
-        
-        try:
-            response = requests.post(url, headers=headers, json=data, timeout=5)
-            response.raise_for_status()
-            
-            token_data = response.json()
-            self.iam_token = token_data["iamToken"]
-            
-            # Токен действует 12 часов
-            self.iam_token_expires = time.time() + 43200
-            
-            logger.info("🔑 IAM токен обновлен")
-            return self.iam_token
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения IAM токена: {e}")
-            raise
+
+        # Тайм-аут на запрос и до 3 попыток при сбоях
+        timeout = aiohttp.ClientTimeout(total=5)
+
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, headers=headers, json=data) as response:
+                        response.raise_for_status()
+                        token_data = await response.json()
+                        self.iam_token = token_data["iamToken"]
+
+                        # Токен действует 12 часов
+                        self.iam_token_expires = time.time() + 43200
+
+                        logger.info("🔑 IAM токен обновлен")
+                        return self.iam_token
+            except Exception as e:
+                logger.error(
+                    f"❌ Ошибка получения IAM токена (попытка {attempt + 1}/3): {e}"
+                )
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                else:
+                    raise
     
     async def synthesize_chunk_fast(self, text: str) -> bytes:
         """
@@ -111,8 +121,9 @@ class YandexGrpcTTS:
         
         try:
             # Метаданные аутентификации
+            iam_token = await self._get_fresh_iam_token()
             metadata = [
-                ('authorization', f'Bearer {self._get_fresh_iam_token()}'),
+                ('authorization', f'Bearer {iam_token}'),
                 ('x-folder-id', self.folder_id)
             ]
             
