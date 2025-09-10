@@ -493,12 +493,15 @@ class AsteriskAIHandler:
         playback = event.get('playback', {})
         playback_id = playback.get('id')
         target_uri = playback.get('target_uri', '')
+        reason = playback.get('reason') or playback.get('cause')
 
         # Извлекаем channel_id из target_uri (формат: channel:1234567890.123)
         if target_uri.startswith('channel:'):
             channel_id = target_uri.replace('channel:', '')
 
-            logger.info(f"🔊 Проигрывание завершено: {playback_id} на канале {channel_id}")
+            logger.info(
+                f"🔊 Проигрывание завершено: {playback_id} на канале {channel_id}, причина: {reason}"
+            )
 
             if channel_id in self.active_calls:
                 call_data = self.active_calls[channel_id]
