@@ -87,28 +87,21 @@ class TTSAdapter:
     async def _http_fallback(self, text: str) -> bytes:
         """Fallback на HTTP TTS"""
         try:
-            # Используем существующий HTTP TTS сервис
-            # Создаем временный файл для получения аудио данных
-            import tempfile
             import os
-            
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
+
             # Генерируем аудио через HTTP TTS
             result = await self.http_tts.text_to_speech(text, "fallback")
-            
+
             if result:
-                # Читаем сгенерированный файл
                 wav_path = os.path.join(self.http_tts.asterisk_sounds_dir, f"{result}.wav")
                 if os.path.exists(wav_path):
                     with open(wav_path, 'rb') as f:
                         audio_data = f.read()
-                    
-                    # Удаляем временный файл
+
                     os.unlink(wav_path)
+                    logger.info(f"✅ Temporary audio file deleted: {wav_path}")
                     return audio_data
-            
+
             logger.error("❌ HTTP TTS fallback failed")
             return b""
             
