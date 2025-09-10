@@ -13,6 +13,10 @@ import uuid
 import os
 import sys
 import time
+import wave
+import io
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -448,19 +452,56 @@ class OptimizedAsteriskAIHandler:
             if not audio_data:
                 logger.warning("⚠️ Пустые аудио данные")
                 return
-            
+
+            # Проверяем/конвертируем аудио в 8 кГц WAV
+            try:
+                with wave.open(io.BytesIO(audio_data), "rb") as wf:
+                    sample_rate = wf.getframerate()
+                if sample_rate != 8000:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_in:
+                        tmp_in.write(audio_data)
+                        tmp_in_path = tmp_in.name
+                    tmp_out_path = tmp_in_path.replace(".wav", "_8k.wav")
+                    try:
+                        subprocess.run(
+                            ["sox", tmp_in_path, "-r", "8000", "-b", "16", "-c", "1", tmp_out_path],
+                            check=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        with open(tmp_out_path, "rb") as f:
+                            audio_data = f.read()
+                    except (subprocess.SubprocessError, FileNotFoundError) as e:
+                        logger.warning(f"⚠️ Конвертация sox не удалась: {e}")
+                    finally:
+                        os.remove(tmp_in_path)
+                        if os.path.exists(tmp_out_path):
+                            os.remove(tmp_out_path)
+            except wave.Error:
+                # Данные без WAV заголовка - предполагаем RAW PCM 8 кГц
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_out:
+                    with wave.open(tmp_out, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(8000)
+                        wf.writeframes(audio_data)
+                    tmp_out_path = tmp_out.name
+                with open(tmp_out_path, "rb") as f:
+                    audio_data = f.read()
+                os.remove(tmp_out_path)
+
             # Сохраняем аудио данные во временный файл
             timestamp = datetime.now().strftime('%H%M%S%f')[:-3]  # миллисекунды
             temp_filename = f"stream_{channel_id}_{timestamp}.wav"
             temp_path = f"/var/lib/asterisk/sounds/{temp_filename}"
-            
+
             # Создаем директорию если не существует
             os.makedirs(os.path.dirname(temp_path), exist_ok=True)
-            
+
             # Записываем аудио данные в файл
             with open(temp_path, 'wb') as f:
                 f.write(audio_data)
-            
+
             logger.info(f"💾 Сохранен аудио файл: {temp_path} ({len(audio_data)} bytes)")
             
             # Воспроизводим через ARI (как в оригинальном коде)

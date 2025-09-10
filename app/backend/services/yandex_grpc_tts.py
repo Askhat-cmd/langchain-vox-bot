@@ -120,8 +120,9 @@ class YandexGrpcTTS:
             request = tts_pb2.UtteranceSynthesisRequest(
                 text=text,
                 output_audio_spec=tts_pb2.AudioFormatOptions(
-                    container_audio=tts_pb2.ContainerAudio(
-                        container_audio_type=tts_pb2.ContainerAudio.ContainerAudioType.WAV
+                    raw_audio=tts_pb2.RawAudio(
+                        audio_encoding=tts_pb2.RawAudio.AudioEncoding.LINEAR16_PCM,
+                        sample_rate_hertz=8000,
                     )
                 ),
                 # КРИТИЧНО: настройки для минимальной латентности
