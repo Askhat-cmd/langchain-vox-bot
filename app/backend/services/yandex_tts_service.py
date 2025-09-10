@@ -127,19 +127,19 @@ class YandexTTSService:
             request = tts_pb2.UtteranceSynthesisRequest(
                 text=text,
                 output_audio_spec=tts_pb2.AudioFormatOptions(
-                    container_audio=tts_pb2.ContainerAudio(
-                        container_audio_type=tts_pb2.ContainerAudio.ContainerAudioType.WAV
+                    raw_audio=tts_pb2.RawAudio(
+                        audio_encoding=tts_pb2.RawAudio.AudioEncoding.LINEAR16_PCM,
+                        sample_rate_hertz=8000,
                     )
                 ),
                 hints=[
                     tts_pb2.Hints(
                         voice="jane",  # Быстрый голос
-                        speed=1.2      # Ускоренная речь
+                        speed=1.2,      # Ускоренная речь
                     )
                 ],
                 loudness_normalization_type=tts_pb2.UtteranceSynthesisRequest.LoudnessNormalizationType.LUFS
             )
-            
             # Выполняем gRPC streaming запрос
             metadata = [
                 ('authorization', f'Bearer {iam_token}'),
@@ -164,46 +164,50 @@ class YandexTTSService:
             # Объединяем все чанки
             audio_data = b''.join(audio_chunks)
             
-            # Сохраняем готовый WAV файл
+            # Сохраняем 8kHz WAV файл без дополнительной конвертации
+            import wave
+
             cache_key = hashlib.md5(text.encode()).hexdigest()
             wav_filename = f"{filename_prefix}_{cache_key}.wav"
             wav_path = os.path.join(self.asterisk_sounds_dir, wav_filename)
-            
-            with open(wav_path, "wb") as f:
-                f.write(audio_data)
-            
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Конвертируем в GSM формат для Asterisk (как все существующие звуки)
+
+            with wave.open(wav_path, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)  # 16 бит
+                wav_file.setframerate(8000)
+                wav_file.writeframes(audio_data)
+
+            # Асинхронная конвертация в GSM (если утилита sox доступна)
+            target_path = wav_path
             gsm_path = wav_path.replace('.wav', '.gsm')
-            sox_cmd = [
-                "sox", "-t", "wav", wav_path, "-r", "8000", "-c", "1", "-t", "gsm", gsm_path
-            ]
-            
+            sox_cmd = ["sox", wav_path, "-r", "8000", "-c", "1", "-t", "gsm", gsm_path]
+
             try:
-                subprocess.run(sox_cmd, check=True, capture_output=True)
-                # Удаляем оригинальный WAV файл
-                os.remove(wav_path)
-                
-                # ИСПРАВЛЕНО: Устанавливаем правильные права доступа для Asterisk
-                subprocess.run(["chown", "asterisk:asterisk", gsm_path], check=True)
-                subprocess.run(["chmod", "644", gsm_path], check=True)
-                logger.info(f"✅ Права доступа установлены: asterisk:asterisk 644")
-                
-                logger.info(f"⚡ gRPC TTS готов за рекордное время (GSM): {os.path.basename(gsm_path)}")
-                # Возвращаем путь к GSM файлу
-                wav_path = gsm_path
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"⚠️ Не удалось конвертировать в GSM: {e}")
-                # Оставляем оригинальный WAV файл как fallback
-                subprocess.run(["chown", "asterisk:asterisk", wav_path], check=True)
-                logger.info(f"⚡ gRPC TTS готов (WAV fallback): {wav_filename}")
-            
-                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отключаем кеширование для диагностики
-                # Кешируем короткие фразы
-                if False:  # Отключаем кеширование
-                    self.tts_cache[hashlib.md5(text.encode()).hexdigest()] = wav_path
-            
-            return wav_path
-            
+                proc = await asyncio.create_subprocess_exec(
+                    *sox_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    os.remove(wav_path)
+                    target_path = gsm_path
+                    logger.info(f"⚡ gRPC TTS готов за рекордное время (GSM): {os.path.basename(gsm_path)}")
+                else:
+                    logger.warning(f"⚠️ Не удалось конвертировать в GSM: {stderr.decode().strip()}")
+                    logger.info(f"⚡ gRPC TTS готов (WAV fallback): {wav_filename}")
+            except FileNotFoundError:
+                logger.warning("⚠️ Утилита sox не найдена, используем WAV без конвертации")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка конвертации в GSM: {e}")
+
+            # Асинхронная установка прав доступа
+            for cmd in (["chown", "asterisk:asterisk", target_path], ["chmod", "644", target_path]):
+                proc = await asyncio.create_subprocess_exec(*cmd)
+                await proc.wait()
+            logger.info("✅ Права доступа установлены: asterisk:asterisk 644")
+
+            return target_path
         except grpc.RpcError as e:
             logger.error(f"❌ gRPC ошибка: {e.code()}: {e.details()}")
             # Fallback на HTTP API
@@ -299,12 +303,8 @@ class YandexTTSService:
                 # Возвращаем имя файла без расширения и пути
                 return os.path.splitext(os.path.basename(cached_path))[0]
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительно используем HTTP TTS (как было до оптимизаций)
-        # Приоритет: HTTP API (рабочий) -> gRPC streaming (проблемный)
-        if False:  # Отключаем gRPC для диагностики
-            full_path = await self.text_to_speech_grpc(text, filename)
-        else:
-            full_path = await self.text_to_speech_http(text, filename)
+        # По умолчанию используем gRPC TTS; при ошибке метод выполнит fallback на HTTP
+        full_path = await self.text_to_speech_grpc(text, filename)
         
         if full_path and os.path.exists(full_path):
             # Возвращаем имя файла без расширения и пути для совместимости
