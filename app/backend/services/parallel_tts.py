@@ -159,23 +159,20 @@ class ParallelTTSProcessor:
         
         try:
             play_start = time.time()
-            
-            # В реальной реализации здесь будет вызов ARI для воспроизведения
-            # success = await self.ari_client.play_audio_data(channel_id, item["audio_data"])
-            
-            # ЗАГЛУШКА: Симулируем воспроизведение
-            await asyncio.sleep(0.1)  # Симулируем время воспроизведения
-            success = True
-            
+
+            success = await self.ari_client.play_audio_data(channel_id, item["audio_data"])
+
             play_time = time.time() - play_start
-            
+
             if success:
-                logger.info(f"🔊 Played chunk {item['chunk_num']}: {play_time:.2f}s - '{item['text'][:30]}...'")
+                logger.info(
+                    f"🔊 Played chunk {item['chunk_num']}: {play_time:.2f}s - '{item['text'][:30]}...'"
+                )
                 return True
             else:
                 logger.error(f"❌ Failed to play chunk {item['chunk_num']}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"❌ Audio playback error: {e}")
             return False
