@@ -157,6 +157,12 @@ class AsteriskAIHandler:
             return
         
         call_data = self.active_calls[channel_id]
+        
+        # Проверяем, что канал еще активен (не завершен)
+        if call_data.get("status") == "Completed":
+            logger.info(f"🚫 Канал {channel_id} уже завершен, пропускаем TTS")
+            return
+        
         call_data["tts_queue"].append(text)
         
         if not call_data["tts_busy"]:
@@ -168,6 +174,11 @@ class AsteriskAIHandler:
             return
         
         call_data = self.active_calls[channel_id]
+        
+        # Проверяем, что канал еще активен (не завершен)
+        if call_data.get("status") == "Completed":
+            logger.info(f"🚫 Канал {channel_id} уже завершен, пропускаем обработку TTS очереди")
+            return
         
         if call_data["tts_busy"]:
             return
@@ -247,20 +258,57 @@ class AsteriskAIHandler:
                 audio_filename = f"stream_{channel_id}_{timestamp}"
                 sound_filename = await self.tts.text_to_speech(text, audio_filename)
             
-            # Проигрывание через Asterisk
+            # Проигрывание через Asterisk ARI
             async with AsteriskARIClient() as ari:
                 playback_id = await ari.play_sound(channel_id, sound_filename, lang=None)
                 
                 if playback_id:
                     call_data["current_playback"] = playback_id
-                    logger.info(f"✅ TTS запущен: {playback_id}")
+                    logger.info(f"✅ TTS запущен через ARI: {playback_id}")
                 else:
-                    logger.warning("Не удалось запустить TTS")
-                    await self.finish_speak_one(channel_id)
+                    logger.warning("⚠️ ARI playback не удался, пробуем fallback через dialplan")
+                    # FALLBACK: Используем dialplan Playback
+                    fallback_success = await self.playback_via_dialplan(channel_id, sound_filename)
+                    if fallback_success:
+                        logger.info("✅ TTS запущен через dialplan fallback")
+                        call_data["current_playback"] = f"dialplan_{sound_filename}"
+                    else:
+                        logger.error("❌ Не удалось запустить TTS ни через ARI, ни через dialplan")
+                        await self.finish_speak_one(channel_id)
         
         except Exception as e:
             logger.error(f"❌ Ошибка TTS: {e}")
             await self.finish_speak_one(channel_id)
+    
+    async def playback_via_dialplan(self, channel_id: str, filename: str) -> bool:
+        """FALLBACK: Проигрывание через dialplan если ARI не работает."""
+        try:
+            async with AsteriskARIClient() as ari:
+                # Отправляем канал в dialplan для проигрывания
+                url = f"{ari.base_url}/channels/{channel_id}/continue"
+                data = {
+                    "context": "playback-context",
+                    "extension": "play",
+                    "priority": 1,
+                    "variables": {
+                        "PLAYBACK_FILE": filename
+                    }
+                }
+                
+                logger.info(f"🔄 Fallback dialplan: проигрываем {filename} на канале {channel_id}")
+                
+                async with ari.session.post(url, json=data) as response:
+                    if response.status in (200, 201, 202):
+                        logger.info("✅ Dialplan fallback запущен успешно")
+                        return True
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"❌ Ошибка dialplan fallback: {response.status} - {error_text}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка при dialplan fallback: {e}")
+            return False
     
     async def finish_speak_one(self, channel_id: str):
         """Завершает проигрывание одной фразы и запускает следующую."""
@@ -375,6 +423,11 @@ class AsteriskAIHandler:
 
         call_data = self.active_calls[channel_id]
         session_id = call_data["session_id"]
+
+        # Проверяем, что канал еще активен (не завершен)
+        if call_data.get("status") == "Completed":
+            logger.info(f"🚫 Канал {channel_id} уже завершен, пропускаем обработку речи")
+            return
 
         try:
             logger.info(f"🎯 Начинаем обработку речи пользователя для канала {channel_id}")
@@ -505,6 +558,15 @@ class AsteriskAIHandler:
         else:
             logger.warning(f"Не найден канал для записи: {recording_name}")
     
+    async def handle_channel_hangup_request(self, event):
+        """Обрабатывает запрос на завершение звонка - помечаем канал как завершенный."""
+        channel_id = event.get('channel', {}).get('id')
+        
+        if channel_id in self.active_calls:
+            call_data = self.active_calls[channel_id]
+            call_data["status"] = "Completed"
+            logger.info(f"📞 Пользователь повесил трубку: {channel_id} - помечаем как завершенный")
+    
     async def handle_event(self, event):
         """Обрабатывает события от Asterisk ARI."""
         event_type = event.get('type')
@@ -514,6 +576,9 @@ class AsteriskAIHandler:
             await self.handle_stasis_start(event)
         elif event_type == 'ChannelDestroyed':
             await self.handle_channel_destroyed(event)
+        elif event_type == 'ChannelHangupRequest':
+            # Пользователь повесил трубку - помечаем канал как завершенный
+            await self.handle_channel_hangup_request(event)
         elif event_type == 'PlaybackFinished':
             # Событие завершения проигрывания - начинаем слушать пользователя
             await self.handle_playback_finished(event)

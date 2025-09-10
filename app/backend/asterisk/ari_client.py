@@ -40,25 +40,29 @@ class AsteriskARIClient:
         """
         try:
             url = f"{self.base_url}/channels/{channel_id}/play"
-            # Формат: sound:ru/filename (указываем папку языка)
-            media = f"sound:ru/{sound_id}"
+            # ИСПРАВЛЕНО: Убираем подпапку ru/ - Asterisk сам найдет файл по имени
+            media = f"sound:{sound_id}"
             data = {"media": media}
             
             logger.info(f"Проигрываем звук: {media} на канале {channel_id}")
             
             async with self.session.post(url, json=data) as response:
+                # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: Логируем полный ответ ARI для диагностики
+                response_text = await response.text()
+                logger.info(f"🔍 ARI Response: status={response.status}, body={response_text}")
+                
                 # ARI может возвращать 200 OK или 201 Created/202 Accepted при успешном создании playback
                 if response.status in (200, 201, 202):
                     try:
-                        result = await response.json()
+                        result = json.loads(response_text)
                         playback_id = result.get('id')
-                    except Exception:
-                        playback_id = None
-                    logger.info(f"✅ Проигрывание принято ARI (status={response.status}), playback_id={playback_id}")
-                    return playback_id or True
+                        logger.info(f"✅ Проигрывание принято ARI (status={response.status}), playback_id={playback_id}")
+                        return playback_id or True
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось распарсить JSON ответ: {e}, raw: {response_text}")
+                        return True  # Возвращаем True если статус OK
                 else:
-                    error_text = await response.text()
-                    logger.error(f"❌ Ошибка проигрывания: {response.status} - {error_text}")
+                    logger.error(f"❌ Ошибка проигрывания: {response.status} - {response_text}")
                     return None
                     
         except Exception as e:
@@ -137,6 +141,16 @@ class AsteriskARIClient:
                 return response.status == 200
         except Exception as e:
             logger.error(f"❌ Ошибка завершения звонка: {e}")
+            return False
+    
+    async def channel_exists(self, channel_id):
+        """Проверяет, существует ли канал в Asterisk."""
+        try:
+            url = f"{self.base_url}/channels/{channel_id}"
+            async with self.session.get(url) as response:
+                return response.status == 200
+        except Exception as e:
+            logger.debug(f"Канал {channel_id} не найден: {e}")
             return False
 
 if __name__ == "__main__":

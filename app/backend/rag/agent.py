@@ -430,3 +430,78 @@ class Agent:
             except Exception as e2:
                 logger.error(f"Фолбэк модель также не справилась: {e2}", exc_info=True)
                 return
+
+    def get_chunked_response_generator(self, user_question: str, session_id: str):
+        """
+        ЯДРО СИСТЕМЫ: Генерирует чанки ответа по символу '|' для немедленного TTS.
+        Основан на существующем get_response_generator, но буферизует до '|'.
+        
+        ЦЕЛЬ: Первый чанк через 0.6-0.8с от начала AI генерации.
+        """
+        import time
+        
+        # Используем существующий streaming generator
+        response_stream = self.get_response_generator(user_question, session_id)
+        
+        buffer = ""
+        chunk_count = 0
+        start_time = time.time()
+        
+        logger.info(f"🤖 Начало chunked генерации для: '{user_question[:50]}...'")
+        
+        try:
+            for token in response_stream:
+                buffer += token
+                
+                # КРИТИЧНО: Как только нашли '|' - НЕМЕДЛЕННО отправляем чанк
+                while "|" in buffer:
+                    chunk_end = buffer.find("|")
+                    sentence = buffer[:chunk_end].strip()
+                    buffer = buffer[chunk_end + 1:]
+                    
+                    if sentence:  # Не отправляем пустые чанки
+                        chunk_count += 1
+                        elapsed = time.time() - start_time
+                        
+                        logger.info(f"⚡ Chunk {chunk_count} ready in {elapsed:.2f}s: '{sentence[:30]}...'")
+                        
+                        # ПЕРВЫЙ ЧАНК - критическая метрика
+                        if chunk_count == 1:
+                            logger.info(f"🎯 FIRST CHUNK TIME: {elapsed:.2f}s (target: <0.8s)")
+                        
+                        yield {
+                            "text": sentence,
+                            "chunk_number": chunk_count,
+                            "elapsed_time": elapsed,
+                            "kb": self.last_kb,
+                            "is_first": chunk_count == 1
+                        }
+            
+            # Отправляем остаток буфера (страховка)
+            if buffer.strip():
+                chunk_count += 1
+                elapsed = time.time() - start_time
+                logger.info(f"🏁 Final chunk {chunk_count}: '{buffer.strip()[:30]}...'")
+                
+                yield {
+                    "text": buffer.strip(),
+                    "chunk_number": chunk_count,
+                    "elapsed_time": elapsed,
+                    "kb": self.last_kb,
+                    "is_final": True
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Chunked generator error: {e}", exc_info=True)
+            # Критично: fallback на обычный генератор
+            logger.warning("🔄 Falling back to regular generator")
+            full_response = ""
+            for token in self.get_response_generator(user_question, session_id):
+                full_response += token
+            yield {
+                "text": full_response,
+                "chunk_number": 1,
+                "elapsed_time": time.time() - start_time,
+                "kb": self.last_kb,
+                "fallback": True
+            }

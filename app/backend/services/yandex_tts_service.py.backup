@@ -37,7 +37,7 @@ class YandexTTSService:
         """Инициализация сверхбыстрого Yandex TTS с gRPC streaming"""
         self.oauth_token = os.getenv("OAUTH_TOKEN")  # Используем OAUTH_TOKEN из .env
         self.folder_id = os.getenv("YANDEX_FOLDER_ID")
-        self.asterisk_sounds_dir = "/usr/share/asterisk/sounds/ru"
+        self.asterisk_sounds_dir = "/var/lib/asterisk/sounds/ru"
         
         # Кеш для коротких фраз (до 100 символов)
         self.tts_cache = {}
@@ -172,35 +172,30 @@ class YandexTTSService:
             with open(wav_path, "wb") as f:
                 f.write(audio_data)
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Конвертируем в GSM формат для Asterisk (как все существующие звуки)
-            gsm_path = wav_path.replace('.wav', '.gsm')
+            # ИСПРАВЛЕНО: Конвертируем в телефонную частоту 8000 Hz для Asterisk
+            temp_path = wav_path + ".temp"
             sox_cmd = [
-                "sox", "-t", "wav", wav_path, "-r", "8000", "-c", "1", "-t", "gsm", gsm_path
+                "sox", "-t", "wav", wav_path, "-r", "8000", "-c", "1", "-e", "signed-integer", "-b", "16", "-t", "wav", temp_path
             ]
             
             try:
                 subprocess.run(sox_cmd, check=True, capture_output=True)
-                # Удаляем оригинальный WAV файл
-                os.remove(wav_path)
+                # Заменяем оригинальный файл конвертированным
+                os.replace(temp_path, wav_path)
                 
                 # ИСПРАВЛЕНО: Устанавливаем правильные права доступа для Asterisk
-                subprocess.run(["chown", "asterisk:asterisk", gsm_path], check=True)
-                subprocess.run(["chmod", "644", gsm_path], check=True)
-                logger.info(f"✅ Права доступа установлены: asterisk:asterisk 644")
-                
-                logger.info(f"⚡ gRPC TTS готов за рекордное время (GSM): {os.path.basename(gsm_path)}")
-                # Возвращаем путь к GSM файлу
-                wav_path = gsm_path
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"⚠️ Не удалось конвертировать в GSM: {e}")
-                # Оставляем оригинальный WAV файл как fallback
                 subprocess.run(["chown", "asterisk:asterisk", wav_path], check=True)
-                logger.info(f"⚡ gRPC TTS готов (WAV fallback): {wav_filename}")
+                
+                logger.info(f"⚡ gRPC TTS готов за рекордное время (8000 Hz): {wav_filename}")
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"⚠️ Не удалось конвертировать в 8000 Hz: {e}")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                logger.info(f"⚡ gRPC TTS готов (оригинальная частота): {wav_filename}")
             
-                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отключаем кеширование для диагностики
-                # Кешируем короткие фразы
-                if False:  # Отключаем кеширование
-                    self.tts_cache[hashlib.md5(text.encode()).hexdigest()] = wav_path
+            # Кешируем короткие фразы
+            if len(text) < 100:
+                self.tts_cache[hashlib.md5(text.encode()).hexdigest()] = wav_path
             
             return wav_path
             
@@ -252,7 +247,7 @@ class YandexTTSService:
             with open(raw_path, "wb") as f:
                 f.write(response.content)
             
-            # ВОССТАНОВЛЕНО: Оригинальная sox конвертация из архивной версии
+            # Конвертируем в WAV для Asterisk (8kHz mono)
             wav_filename = f"{filename_prefix}_{cache_key}.wav"
             wav_path = os.path.join(self.asterisk_sounds_dir, wav_filename)
             
@@ -264,14 +259,16 @@ class YandexTTSService:
             
             subprocess.run(sox_cmd, check=True, capture_output=True)
             
+            # ИСПРАВЛЕНО: Устанавливаем правильные права доступа для Asterisk
+            subprocess.run(["chown", "asterisk:asterisk", wav_path], check=True)
+            
             # Удаляем временный raw файл
             os.remove(raw_path)
             
             logger.info(f"✅ HTTP TTS готов: {wav_filename}")
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отключаем кеширование для диагностики
             # Кешируем короткие фразы
-            if False:  # Отключаем кеширование
+            if len(text) < 100:
                 self.tts_cache[cache_key] = wav_path
             
             return wav_path
@@ -289,37 +286,24 @@ class YandexTTSService:
             logger.warning("⚠️ Пустой текст для TTS")
             return None
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отключаем кеширование для диагностики
         # Проверяем кеш для коротких фраз
         cache_key = hashlib.md5(text.encode()).hexdigest()
-        if False:  # Отключаем кеширование
+        if len(text) < 100 and cache_key in self.tts_cache:
             cached_path = self.tts_cache[cache_key]
             if os.path.exists(cached_path):
                 logger.info(f"🎯 Используем кешированный TTS для: {text[:30]}...")
                 # Возвращаем имя файла без расширения и пути
                 return os.path.splitext(os.path.basename(cached_path))[0]
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительно используем HTTP TTS (как было до оптимизаций)
-        # Приоритет: HTTP API (рабочий) -> gRPC streaming (проблемный)
-        if False:  # Отключаем gRPC для диагностики
+        # Приоритет: gRPC streaming (самый быстрый) -> HTTP API
+        if GRPC_AVAILABLE and self.tts_stub:
             full_path = await self.text_to_speech_grpc(text, filename)
         else:
             full_path = await self.text_to_speech_http(text, filename)
         
         if full_path and os.path.exists(full_path):
             # Возвращаем имя файла без расширения и пути для совместимости
-            # Поддерживаем как .wav, так и .gsm, .ulaw, .alaw расширения
-            filename = os.path.basename(full_path)
-            if filename.endswith('.gsm'):
-                return filename[:-4]  # убираем .gsm
-            elif filename.endswith('.ulaw'):
-                return filename[:-5]  # убираем .ulaw
-            elif filename.endswith('.alaw'):
-                return filename[:-5]  # убираем .alaw
-            elif filename.endswith('.wav'):
-                return filename[:-4]  # убираем .wav
-            else:
-                return filename
+            return os.path.splitext(os.path.basename(full_path))[0]
         else:
             return None
     
