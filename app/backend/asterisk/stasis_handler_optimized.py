@@ -11,6 +11,8 @@ import logging
 import websockets
 import uuid
 import os
+import pwd
+import grp
 import sys
 import time
 from datetime import datetime, timezone
@@ -460,7 +462,20 @@ class OptimizedAsteriskAIHandler:
             # Записываем аудио данные в файл
             with open(temp_path, 'wb') as f:
                 f.write(audio_data)
-            
+
+            # Устанавливаем владельца и права доступа для Asterisk
+            try:
+                uid = pwd.getpwnam('asterisk').pw_uid
+                gid = grp.getgrnam('asterisk').gr_gid
+                os.chown(temp_path, uid, gid)
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось изменить владельца файла {temp_path}: {e}")
+
+            try:
+                os.chmod(temp_path, 0o644)
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось установить права на файл {temp_path}: {e}")
+
             logger.info(f"💾 Сохранен аудио файл: {temp_path} ({len(audio_data)} bytes)")
             
             # Воспроизводим через ARI (как в оригинальном коде)
