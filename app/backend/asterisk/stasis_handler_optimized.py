@@ -82,6 +82,21 @@ class OptimizedAsteriskAIHandler:
         # VAD СЕРВИС ДЛЯ УМЕНЬШЕНИЯ ПАУЗЫ
         self.vad_service = None
         self.vad_enabled = os.getenv("VAD_ENABLED", "false").lower() == "true"
+
+        # Максимальное время записи речи (используется как fallback, если VAD отключен)
+        speech_max_env = os.getenv("SPEECH_MAX_RECORDING_TIME") or os.getenv("VAD_MAX_RECORDING_TIME")
+        try:
+            self.max_recording_time = float(speech_max_env) if speech_max_env else 8.0
+        except (TypeError, ValueError):
+            logger.warning(
+                "⚠️ Некорректное значение SPEECH_MAX_RECORDING_TIME=%s, используем 8.0с по умолчанию",
+                speech_max_env,
+            )
+            self.max_recording_time = 8.0
+
+        # Ограничение длительности записи без VAD (чтобы не ждать 15 секунд молчания)
+        self._no_vad_fallback_limit = 8.0
+        self.fallback_recording_time = max(1.0, min(self.max_recording_time, self._no_vad_fallback_limit))
         
         # Активные звонки с оптимизированными данными
         self.active_calls = {}
@@ -121,10 +136,21 @@ class OptimizedAsteriskAIHandler:
             
             # 5. VAD сервис для уменьшения паузы
             if self.vad_enabled:
-                self.vad_service = await get_vad_service()
-                logger.info("✅ VAD сервис инициализирован для уменьшения паузы")
+                self.vad_service = get_vad_service()
+                if self.vad_service:
+                    self.max_recording_time = getattr(self.vad_service, "max_recording_time", self.max_recording_time)
+                    self.fallback_recording_time = max(
+                        1.0, min(self.max_recording_time, self._no_vad_fallback_limit)
+                    )
+                logger.info(
+                    "✅ VAD сервис инициализирован для уменьшения паузы (max=%ss)",
+                    self.max_recording_time,
+                )
             else:
-                logger.info("⚠️ VAD сервис отключен")
+                logger.info(
+                    "⚠️ VAD сервис отключен, используем длительность записи %ss",
+                    self.fallback_recording_time,
+                )
             
             logger.info("✅ Все сервисы оптимизации инициализированы")
             
@@ -291,11 +317,6 @@ class OptimizedAsteriskAIHandler:
                 logger.info(f"🤖 Запрашиваем ОПТИМИЗИРОВАННЫЙ ответ от AI агента")
                 
                 try:
-                    # Запускаем filler word НЕМЕДЛЕННО
-                    filler_task = asyncio.create_task(
-                        self._play_instant_filler(channel_id, normalized_text)
-                    )
-                    
                     # ВРЕМЕННО: Используем оригинальный метод для тестирования
                     # TODO: Вернуться к chunked generator после исправления
                     logger.info("🔄 ВРЕМЕННО: Используем оригинальный AI response для тестирования")
@@ -305,9 +326,6 @@ class OptimizedAsteriskAIHandler:
                     
                     # Обрабатываем AI ответы через оригинальный метод
                     await self.process_ai_response_streaming(channel_id, response_generator)
-                    
-                    # Ждем завершения filler
-                    await filler_task
                     
                     total_time = time.time() - overall_start
                     logger.info(f"✅ ОПТИМИЗИРОВАННАЯ обработка завершена: {total_time:.2f}s")
@@ -799,10 +817,7 @@ class OptimizedAsteriskAIHandler:
                 call_data["last_speak_started_at"] = int(time.time() * 1000)
                 logger.info(f"🔊 Начало воспроизведения для {channel_id}: {playback_id}")
                 
-                # Отключаем VAD мониторинг во время воспроизведения
-                if self.vad_enabled and self.vad_service:
-                    await self.vad_service.stop_monitoring(channel_id)
-                    logger.info(f"🎯 VAD мониторинг отключен для {channel_id} (начало воспроизведения)")
+                # VAD мониторинг НЕ отключаем во время воспроизведения - он должен работать только во время записи пользователя
     
     async def handle_playback_finished(self, event):
         """Обрабатывает завершение воспроизведения - запускает запись пользователя"""
