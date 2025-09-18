@@ -13,6 +13,7 @@ import uuid
 import os
 import sys
 import time
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -289,7 +290,7 @@ class OptimizedAsteriskAIHandler:
 
                 # Обновляем VAD активность при получении ASR результата
                 if self.vad_enabled and self.vad_service:
-                    await self.vad_service.update_activity(channel_id)
+                    self.vad_service.update_activity(channel_id)
 
                 # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем на пустой результат ASR
                 if not normalized_text or not normalized_text.strip():
@@ -859,14 +860,25 @@ class OptimizedAsteriskAIHandler:
             if self.vad_enabled and self.vad_service:
                 # VAD режим - используем максимальное время как fallback, VAD остановит раньше
                 recording_duration = self.max_recording_time
-                logger.info(f"🎤 Запускаем VAD запись речи пользователя: {recording_filename}, max_duration={recording_duration}s")
+                logger.info(
+                    "🎤 Запускаем VAD запись речи пользователя: %s, max_duration=%ss",
+                    recording_filename,
+                    recording_duration,
+                )
             else:
-                # Обычный режим - используем стандартную длительность
-                recording_duration = 15.0
-                logger.info(f"🎤 Запускаем обычную запись речи пользователя: {recording_filename}, duration={recording_duration}s")
-            
+                # Обычный режим - используем укороченную длительность, чтобы быстрее отдавать ответ
+                recording_duration = self.fallback_recording_time
+                logger.info(
+                    "🎤 Запускаем обычную запись речи пользователя: %s, duration=%ss (fallback без VAD)",
+                    recording_filename,
+                    recording_duration,
+                )
+
             async with AsteriskARIClient() as ari:
-                recording_id = await ari.start_recording(channel_id, recording_filename, max_duration=int(recording_duration))
+                max_duration_seconds = max(1, math.ceil(recording_duration))
+                recording_id = await ari.start_recording(
+                    channel_id, recording_filename, max_duration=max_duration_seconds
+                )
                 
                 # Status 201 означает успешный запуск записи
                 if recording_id and channel_id in self.active_calls:
@@ -879,7 +891,7 @@ class OptimizedAsteriskAIHandler:
                     
                     # Запускаем VAD мониторинг для уменьшения паузы
                     if self.vad_enabled and self.vad_service:
-                        vad_success = await self.vad_service.start_monitoring(
+                        vad_success = self.vad_service.start_monitoring(
                             channel_id, 
                             recording_id, 
                             self._on_vad_recording_finished
@@ -982,7 +994,7 @@ class OptimizedAsteriskAIHandler:
                 
                 # Останавливаем VAD мониторинг
                 if self.vad_service:
-                    await self.vad_service.stop_monitoring(channel_id)
+                    self.vad_service.stop_monitoring(channel_id)
             
             # Обрабатываем записанную речь
             if channel_id in self.active_calls:
