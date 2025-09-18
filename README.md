@@ -480,6 +480,13 @@ python -m grpc_tools.protoc --python_out=. *.proto
     DB_PATH="data/db/log_db.sqlite"
     KB_TOP_K="3"
     KB_FALLBACK_THRESHOLD="0.2"
+    # Настройки VAD и записи речи
+    VAD_ENABLED="true"
+    VAD_SILENCE_TIMEOUT="2.0"
+    VAD_MIN_RECORDING_TIME="1.0"
+    VAD_MAX_RECORDING_TIME="12.0"
+    VAD_DEBUG_LOGGING="false"
+    SPEECH_MAX_RECORDING_TIME="8.0"
     ```
 5.  **Наполните `knowledge_base.md`** вашими данными.
 
@@ -541,6 +548,12 @@ nohup venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:900
   - `PROMPTS_FILE_PATH` — путь к `prompts.json`.
   - `KNOWLEDGE_BASE_PATH` — путь к файлу БЗ (`knowledge_base.md` или др.).
   - `PERSIST_DIRECTORY` — директория Chroma (например, `chroma_db_metrotech`).
+  - `VAD_ENABLED` — включает/отключает SimpleVAD; **рекомендуется `true`** в продакшене, чтобы обрезать паузы клиента.
+  - `VAD_SILENCE_TIMEOUT` — сколько секунд тишины ждать перед остановкой записи (обычно `1.5–2.0`).
+  - `VAD_MIN_RECORDING_TIME` — минимальная длина записи, чтобы не обрывать короткие ответы (`1.0–1.5`).
+  - `VAD_MAX_RECORDING_TIME` — верхний предел записи при активном VAD (`12–15` секунд, служит безопасным ограничителем).
+  - `VAD_DEBUG_LOGGING` — подробные логи VAD (`false` в продакшене, `true` для диагностики).
+  - `SPEECH_MAX_RECORDING_TIME` — fallback длительность без VAD (`6–8` секунд); используется до старта VAD и когда он отключён.
 
 - Эндпойнты:
   - `GET /` — здоровье сервиса.

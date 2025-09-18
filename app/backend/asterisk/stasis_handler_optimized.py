@@ -13,6 +13,7 @@ import uuid
 import os
 import sys
 import time
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -82,6 +83,21 @@ class OptimizedAsteriskAIHandler:
         # VAD СЕРВИС ДЛЯ УМЕНЬШЕНИЯ ПАУЗЫ
         self.vad_service = None
         self.vad_enabled = os.getenv("VAD_ENABLED", "false").lower() == "true"
+
+        # Максимальное время записи речи (используется как fallback, если VAD отключен)
+        speech_max_env = os.getenv("SPEECH_MAX_RECORDING_TIME") or os.getenv("VAD_MAX_RECORDING_TIME")
+        try:
+            self.max_recording_time = float(speech_max_env) if speech_max_env else 8.0
+        except (TypeError, ValueError):
+            logger.warning(
+                "⚠️ Некорректное значение SPEECH_MAX_RECORDING_TIME=%s, используем 8.0с по умолчанию",
+                speech_max_env,
+            )
+            self.max_recording_time = 8.0
+
+        # Ограничение длительности записи без VAD (чтобы не ждать 15 секунд молчания)
+        self._no_vad_fallback_limit = 8.0
+        self.fallback_recording_time = max(1.0, min(self.max_recording_time, self._no_vad_fallback_limit))
         
         # Активные звонки с оптимизированными данными
         self.active_calls = {}
@@ -121,10 +137,21 @@ class OptimizedAsteriskAIHandler:
             
             # 5. VAD сервис для уменьшения паузы
             if self.vad_enabled:
-                self.vad_service = await get_vad_service()
-                logger.info("✅ VAD сервис инициализирован для уменьшения паузы")
+                self.vad_service = get_vad_service()
+                if self.vad_service:
+                    self.max_recording_time = getattr(self.vad_service, "max_recording_time", self.max_recording_time)
+                    self.fallback_recording_time = max(
+                        1.0, min(self.max_recording_time, self._no_vad_fallback_limit)
+                    )
+                logger.info(
+                    "✅ VAD сервис инициализирован для уменьшения паузы (max=%ss)",
+                    self.max_recording_time,
+                )
             else:
-                logger.info("⚠️ VAD сервис отключен")
+                logger.info(
+                    "⚠️ VAD сервис отключен, используем длительность записи %ss",
+                    self.fallback_recording_time,
+                )
             
             logger.info("✅ Все сервисы оптимизации инициализированы")
             
@@ -844,14 +871,25 @@ class OptimizedAsteriskAIHandler:
             if self.vad_enabled and self.vad_service:
                 # VAD режим - используем максимальное время как fallback, VAD остановит раньше
                 recording_duration = self.max_recording_time
-                logger.info(f"🎤 Запускаем VAD запись речи пользователя: {recording_filename}, max_duration={recording_duration}s")
+                logger.info(
+                    "🎤 Запускаем VAD запись речи пользователя: %s, max_duration=%ss",
+                    recording_filename,
+                    recording_duration,
+                )
             else:
-                # Обычный режим - используем стандартную длительность
-                recording_duration = 15.0
-                logger.info(f"🎤 Запускаем обычную запись речи пользователя: {recording_filename}, duration={recording_duration}s")
-            
+                # Обычный режим - используем укороченную длительность, чтобы быстрее отдавать ответ
+                recording_duration = self.fallback_recording_time
+                logger.info(
+                    "🎤 Запускаем обычную запись речи пользователя: %s, duration=%ss (fallback без VAD)",
+                    recording_filename,
+                    recording_duration,
+                )
+
             async with AsteriskARIClient() as ari:
-                recording_id = await ari.start_recording(channel_id, recording_filename, max_duration=int(recording_duration))
+                max_duration_seconds = max(1, math.ceil(recording_duration))
+                recording_id = await ari.start_recording(
+                    channel_id, recording_filename, max_duration=max_duration_seconds
+                )
                 
                 # Status 201 означает успешный запуск записи
                 if recording_id and channel_id in self.active_calls:
