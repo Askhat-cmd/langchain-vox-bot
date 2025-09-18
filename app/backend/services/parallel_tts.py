@@ -7,9 +7,11 @@ Parallel TTS Processor для параллельной обработки чан
 import asyncio
 import time
 import logging
+import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Any
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,13 @@ class ParallelTTSProcessor:
         self.grpc_tts = grpc_tts
         self.ari_client = ari_client
         
+        # Конфигурация из .env
+        self.tts_workers = int(os.getenv("TTS_PARALLEL_WORKERS", "3"))
+        self.audio_buffer_size = int(os.getenv("AUDIO_BUFFER_SIZE", "2"))
+        
+        # ThreadPoolExecutor для параллельных TTS запросов
+        self.tts_pool = ThreadPoolExecutor(max_workers=self.tts_workers)
+        
         # Управление очередями по каналам
         self.playback_queues: Dict[str, List[Dict]] = defaultdict(list)
         self.playback_busy: Dict[str, bool] = defaultdict(bool)
@@ -43,7 +52,7 @@ class ParallelTTSProcessor:
         # Метрики производительности
         self.performance_metrics: Dict[str, Dict] = defaultdict(dict)
         
-        logger.info("🔄 ParallelTTSProcessor инициализирован")
+        logger.info(f"🔄 ParallelTTSProcessor инициализирован с {self.tts_workers} TTS workers")
     
     async def process_chunk_immediate(self, channel_id: str, chunk_data: Dict[str, Any]):
         """
@@ -83,9 +92,19 @@ class ParallelTTSProcessor:
         tts_start = time.time()
         
         try:
+            # КРИТИЧНО: Проверяем канал перед TTS
+            if not await self.ari_client.channel_exists(channel_id):
+                logger.warning(f"⚠️ Канал {channel_id} не существует, пропускаем TTS chunk {chunk_num}")
+                return
+            
             # gRPC TTS (параллельно с другими чанками)
             audio_data = await self.grpc_tts.synthesize_chunk_fast(text)
             tts_time = time.time() - tts_start
+            
+            # Повторная проверка канала после TTS
+            if not await self.ari_client.channel_exists(channel_id):
+                logger.warning(f"⚠️ Канал {channel_id} закрылся во время TTS, пропускаем chunk {chunk_num}")
+                return
             
             logger.info(f"✅ TTS done for chunk {chunk_num}: {tts_time:.2f}s")
             

@@ -431,14 +431,46 @@ class Agent:
                 logger.error(f"Фолбэк модель также не справилась: {e2}", exc_info=True)
                 return
 
+    def _is_sentence_complete(self, text: str, min_length: int = 50, max_length: int = 200) -> bool:
+        """
+        Определяет завершенность предложения для chunking.
+        Учитывает ваши маркеры сегментации "|" и естественные границы предложений.
+        """
+        if not text or len(text) < min_length:
+            return False
+            
+        # Принудительная отправка при превышении максимальной длины
+        if len(text) >= max_length:
+            return True
+            
+        # Проверяем маркеры сегментации "|"
+        if text.endswith(('.|', '?|', '!|')):
+            return True
+            
+        # Проверяем естественные границы предложений
+        if text.endswith(('.', '?', '!', ':', ';')):
+            # Дополнительная проверка: не слишком короткое предложение
+            if len(text) >= min_length:
+                return True
+                
+        # Проверяем переходы на новую строку (могут быть в markdown)
+        if '\n' in text and len(text) >= min_length:
+            return True
+            
+        return False
+
     def get_chunked_response_generator(self, user_question: str, session_id: str):
         """
-        ЯДРО СИСТЕМЫ: Генерирует чанки ответа по символу '|' для немедленного TTS.
-        Основан на существующем get_response_generator, но буферизует до '|'.
+        ЯДРО СИСТЕМЫ: Генерирует чанки ответа с умной сегментацией для немедленного TTS.
+        Основан на существующем get_response_generator, но буферизует до завершения предложений.
         
         ЦЕЛЬ: Первый чанк через 0.6-0.8с от начала AI генерации.
         """
         import time
+        
+        # Конфигурация из .env
+        chunk_min_length = int(os.getenv("CHUNK_MIN_LENGTH", "50"))
+        chunk_max_length = int(os.getenv("CHUNK_MAX_LENGTH", "200"))
         
         # Используем существующий streaming generator
         response_stream = self.get_response_generator(user_question, session_id)
@@ -453,11 +485,10 @@ class Agent:
             for token in response_stream:
                 buffer += token
                 
-                # КРИТИЧНО: Как только нашли '|' - НЕМЕДЛЕННО отправляем чанк
-                while "|" in buffer:
-                    chunk_end = buffer.find("|")
-                    sentence = buffer[:chunk_end].strip()
-                    buffer = buffer[chunk_end + 1:]
+                # УМНАЯ СЕГМЕНТАЦИЯ: Проверяем завершенность предложений
+                if self._is_sentence_complete(buffer, chunk_min_length, chunk_max_length):
+                    sentence = buffer.strip()
+                    buffer = ""
                     
                     if sentence:  # Не отправляем пустые чанки
                         chunk_count += 1

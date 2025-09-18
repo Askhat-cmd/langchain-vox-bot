@@ -135,38 +135,24 @@ class AsteriskARIClient:
             return False
 
     async def hold_channel(self, channel_id):
-        """
-        КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Убираем проверку существования
-        Asterisk может показывать канал как "несуществующий" но hold все равно работает
-        """
+        """Удерживает канал - пользователь не может повесить трубку."""
+        # 🎯 ЭТАП 2.3: Проверка существования канала перед удержанием
+        if not await self.channel_exists(channel_id):
+            logger.warning(f"⚠️ Канал {channel_id} не существует, пропускаем удержание")
+            return False
+            
         try:
             url = f"{self.base_url}/channels/{channel_id}/hold"
             async with self.session.post(url) as response:
-                if response.status in (200, 201, 204):
-                    logger.info(f"🔒 Канал {channel_id} поставлен на hold")
+                if response.status in (200, 201):
+                    logger.info(f"✅ Канал {channel_id} удержан")
                     return True
                 else:
                     error_text = await response.text()
-                    logger.warning(f"⚠️ Hold failed {channel_id}: {response.status} - {error_text}")
+                    logger.warning(f"⚠️ Не удалось удержать канал {channel_id}: {response.status} - {error_text}")
                     return False
         except Exception as e:
-            logger.error(f"❌ Hold error {channel_id}: {e}")
-            return False
-
-    async def unhold_channel(self, channel_id):
-        """КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Убираем проверку существования"""
-        try:
-            url = f"{self.base_url}/channels/{channel_id}/unhold"
-            async with self.session.delete(url) as response:
-                if response.status in (200, 201, 204):
-                    logger.info(f"🔓 Канал {channel_id} снят с hold")
-                    return True
-                else:
-                    error_text = await response.text()
-                    logger.warning(f"⚠️ Unhold failed {channel_id}: {response.status} - {error_text}")
-                    return False
-        except Exception as e:
-            logger.error(f"❌ Unhold error {channel_id}: {e}")
+            logger.error(f"❌ Ошибка удержания канала {channel_id}: {e}")
             return False
 
     async def hangup_channel(self, channel_id):
@@ -192,38 +178,6 @@ class AsteriskARIClient:
                 return response.status == 200
         except Exception as e:
             logger.debug(f"Канал {channel_id} не найден: {e}")
-            return False
-    
-    async def hold_channel(self, channel_id):
-        """Принудительно удерживает канал для обработки"""
-        try:
-            url = f"{self.base_url}/channels/{channel_id}/hold"
-            async with self.session.post(url) as response:
-                if response.status == 204:
-                    logger.info(f"🔒 Канал {channel_id} успешно удержан")
-                    return True
-                else:
-                    error_text = await response.text()
-                    logger.warning(f"⚠️ Не удалось удержать канал {channel_id}: {response.status} - {error_text}")
-                    return False
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка удержания канала {channel_id}: {e}")
-            return False
-    
-    async def unhold_channel(self, channel_id):
-        """Снимает удержание канала"""
-        try:
-            url = f"{self.base_url}/channels/{channel_id}/unhold"
-            async with self.session.post(url) as response:
-                if response.status == 204:
-                    logger.info(f"🔓 Канал {channel_id} успешно разблокирован")
-                    return True
-                else:
-                    error_text = await response.text()
-                    logger.warning(f"⚠️ Не удалось разблокировать канал {channel_id}: {response.status} - {error_text}")
-                    return False
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка разблокировки канала {channel_id}: {e}")
             return False
 
 if __name__ == "__main__":

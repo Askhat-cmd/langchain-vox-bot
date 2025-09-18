@@ -151,6 +151,49 @@ class TTSAdapter:
             "total_requests": total_requests
         }
     
+    async def synthesize_chunk_fast(self, text: str) -> Optional[bytes]:
+        """
+        Быстрый синтез для чанков с приоритетом на скорость
+        Используется ParallelTTSProcessor для немедленной обработки
+        """
+        try:
+            # Используем gRPC для максимальной скорости
+            if self.grpc_healthy:
+                start_time = time.time()
+                audio_data = await self.grpc_tts.synthesize(text)
+                latency = time.time() - start_time
+                
+                if audio_data:
+                    self.metrics["grpc_success_count"] += 1
+                    self.metrics["grpc_latency_sum"] += latency
+                    self.metrics["grpc_latency_count"] += 1
+                    
+                    # Логируем быстрые чанки
+                    if latency < 0.5:
+                        logger.info(f"⚡ Fast chunk TTS: {latency:.3f}s for '{text[:30]}...'")
+                    else:
+                        logger.warning(f"🐌 Slow chunk TTS: {latency:.3f}s for '{text[:30]}...'")
+                    
+                    return audio_data
+                else:
+                    raise Exception("gRPC TTS returned None")
+            else:
+                raise Exception("gRPC TTS not healthy")
+                
+        except Exception as e:
+            logger.error(f"❌ Chunk TTS error: {e}")
+            self.metrics["grpc_error_count"] += 1
+            
+            # Fallback на HTTP TTS
+            try:
+                logger.info("🔄 Chunk TTS fallback to HTTP")
+                audio_data = await self.http_tts.synthesize(text)
+                self.metrics["http_fallback_count"] += 1
+                return audio_data
+            except Exception as e2:
+                logger.error(f"❌ HTTP fallback also failed: {e2}")
+                return None
+
     async def close(self):
         """Закрытие всех соединений"""
         if self.grpc_tts:
