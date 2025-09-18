@@ -34,8 +34,7 @@ from app.backend.services.yandex_grpc_tts import YandexGrpcTTS
 from app.backend.services.tts_adapter import TTSAdapter
 from app.backend.services.filler_tts import InstantFillerTTS
 from app.backend.services.parallel_tts import ParallelTTSProcessor
-from app.backend.services.smart_speech_detector import SmartSpeechDetector
-from app.backend.services.speech_filter import SpeechFilter
+# Удалены SmartSpeechDetector и SpeechFilter - используем только нашу VAD систему
 from app.backend.services.simple_vad_service import get_vad_service
 # Удален adaptive_recording - возвращаемся к простой логике
 
@@ -78,11 +77,7 @@ class OptimizedAsteriskAIHandler:
         self.parallel_tts = None
         # Удален adaptive_recording - возвращаемся к простой логике
         
-        # НОВЫЕ КОМПОНЕНТЫ УМНОЙ ДЕТЕКЦИИ РЕЧИ
-        self.speech_detector = None
-        self.speech_filter = None
-        self.smart_detection_enabled = os.getenv("SPEECH_DETECTION_ENABLED", "false").lower() == "true"
-        self.speech_debug_logging = os.getenv("SPEECH_DEBUG_LOGGING", "false").lower() == "true"
+        # Удалены компоненты умной детекции речи - используем только VAD систему
         
         # VAD СЕРВИС ДЛЯ УМЕНЬШЕНИЯ ПАУЗЫ
         self.vad_service = None
@@ -96,10 +91,7 @@ class OptimizedAsteriskAIHandler:
         self.BARGE_IN_GUARD_MS = 1500  # Увеличено для Asterisk
         self.INPUT_DEBOUNCE_MS = 1200
         
-        # Конфигурация умной детекции речи
-        self.silence_timeout = float(os.getenv("SPEECH_SILENCE_TIMEOUT", "1.2"))
-        self.min_speech_duration = float(os.getenv("SPEECH_MIN_DURATION", "0.5"))
-        self.max_recording_time = float(os.getenv("SPEECH_MAX_RECORDING_TIME", "15.0"))
+        # Конфигурация VAD системы (удалены параметры умной детекции речи)
         
         # Метрики производительности
         self.performance_metrics = {}
@@ -127,21 +119,10 @@ class OptimizedAsteriskAIHandler:
             ari_client = AsteriskARIClient()
             self.parallel_tts = ParallelTTSProcessor(self.tts_adapter, ari_client)
             
-            # 5. Умная детекция речи
-            if self.smart_detection_enabled:
-                self.speech_detector = SmartSpeechDetector(
-                    silence_timeout=self.silence_timeout,
-                    min_speech_duration=self.min_speech_duration
-                )
-                self.speech_filter = SpeechFilter()
-                logger.info(f"✅ Умная детекция речи включена: timeout={self.silence_timeout}s, min_duration={self.min_speech_duration}s")
-            else:
-                logger.info("⚠️ Умная детекция речи отключена")
-            
-            # 6. VAD сервис для уменьшения паузы
+            # 5. VAD сервис для уменьшения паузы
             if self.vad_enabled:
-                self.vad_service = get_vad_service()
-                logger.info("✅ VAD сервис включен для уменьшения паузы после речи")
+                self.vad_service = await get_vad_service()
+                logger.info("✅ VAD сервис инициализирован для уменьшения паузы")
             else:
                 logger.info("⚠️ VAD сервис отключен")
             
@@ -289,31 +270,7 @@ class OptimizedAsteriskAIHandler:
                     logger.warning(f"⚠️ ASR вернул пустой результат, пропускаем обработку")
                     return
 
-                # 🧠 УМНАЯ ФИЛЬТРАЦИЯ: Проверяем информативность речи
-                if self.smart_detection_enabled and self.speech_filter:
-                    if self.speech_debug_logging:
-                        analysis = self.speech_filter.get_detailed_analysis(normalized_text)
-                        logger.info(f"🧠 Анализ речи: {analysis}")
-                    
-                    if not self.speech_filter.is_informative(normalized_text):
-                        logger.info(f"🗑️ Речь неинформативна: '{normalized_text}' - пропускаем обработку")
-                        
-                        # Добавляем в транскрипт с пометкой
-                        call_data["transcript"].append({
-                            "speaker": "user",
-                            "text": normalized_text,
-                            "raw": user_text,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "filtered": True,
-                            "filter_reason": "non_informative"
-                        })
-                        
-                        # Запускаем новую запись после неинформативной фразы
-                        await asyncio.sleep(0.5)  # Небольшая пауза
-                        await self.start_user_recording(channel_id)
-                        return
-                    else:
-                        logger.info(f"✅ Речь информативна: '{normalized_text}' - продолжаем обработку")
+                # Удалена умная фильтрация речи - используем только VAD систему
 
                 # Добавляем в транскрипт
                 call_data["transcript"].append({
@@ -888,14 +845,10 @@ class OptimizedAsteriskAIHandler:
                 # VAD режим - используем максимальное время как fallback, VAD остановит раньше
                 recording_duration = self.max_recording_time
                 logger.info(f"🎤 Запускаем VAD запись речи пользователя: {recording_filename}, max_duration={recording_duration}s")
-            elif self.smart_detection_enabled:
-                # Умный режим (старый) - используем короткую запись с детекцией окончания
-                recording_duration = min(self.silence_timeout + 2.0, self.max_recording_time)
-                logger.info(f"🎤 Запускаем УМНУЮ запись речи пользователя: {recording_filename}, duration={recording_duration}s")
             else:
-                # В обычном режиме используем стандартную длительность
-                recording_duration = self.max_recording_time
-                logger.info(f"🎤 Запускаем запись речи пользователя: {recording_filename}, duration={recording_duration}s")
+                # Обычный режим - используем стандартную длительность
+                recording_duration = 15.0
+                logger.info(f"🎤 Запускаем обычную запись речи пользователя: {recording_filename}, duration={recording_duration}s")
             
             async with AsteriskARIClient() as ari:
                 recording_id = await ari.start_recording(channel_id, recording_filename, max_duration=int(recording_duration))
@@ -905,7 +858,7 @@ class OptimizedAsteriskAIHandler:
                     self.active_calls[channel_id]["current_recording"] = recording_id
                     self.active_calls[channel_id]["recording_filename"] = recording_filename
                     self.active_calls[channel_id]["is_recording"] = True
-                    self.active_calls[channel_id]["smart_detection_active"] = self.smart_detection_enabled
+                    # Удален smart_detection_active - используем только VAD
                     self.active_calls[channel_id]["vad_processed"] = False  # Сбрасываем флаг для новой записи
                     self.active_calls[channel_id]["processing_speech"] = False  # Сбрасываем флаг обработки речи
                     
@@ -921,11 +874,7 @@ class OptimizedAsteriskAIHandler:
                         else:
                             logger.warning(f"⚠️ Не удалось запустить VAD мониторинг для {channel_id}")
                     
-                    # Инициализируем детектор речи для умного режима (старый)
-                    if self.smart_detection_enabled and self.speech_detector:
-                        self.speech_detector.reset()
-                        self.active_calls[channel_id]["speech_detection_start"] = time.time()
-                        logger.info(f"🧠 Умная детекция речи активирована для канала {channel_id}")
+                    # Удалена инициализация умного детектора речи - используем только VAD
                     
                     logger.info(f"✅ Запись запущена: {recording_id}")
                 else:
