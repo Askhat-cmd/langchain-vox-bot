@@ -116,8 +116,10 @@ class OptimizedAsteriskAIHandler:
             await self.filler_tts.initialize()
             
             # 4. Parallel TTS Processor
-            ari_client = AsteriskARIClient()
-            self.parallel_tts = ParallelTTSProcessor(self.tts_adapter, ari_client)
+            self.parallel_tts = ParallelTTSProcessor(
+                self.tts_adapter,
+                lambda: AsteriskARIClient(),
+            )
             
             # 5. VAD сервис для уменьшения паузы
             if self.vad_enabled:
@@ -296,15 +298,14 @@ class OptimizedAsteriskAIHandler:
                         self._play_instant_filler(channel_id, normalized_text)
                     )
                     
-                    # ВРЕМЕННО: Используем оригинальный метод для тестирования
-                    # TODO: Вернуться к chunked generator после исправления
-                    logger.info("🔄 ВРЕМЕННО: Используем оригинальный AI response для тестирования")
-                    
-                    # Получаем обычный response generator от AI Agent
-                    response_generator = self.agent.get_response_generator(normalized_text, session_id)
-                    
-                    # Обрабатываем AI ответы через оригинальный метод
-                    await self.process_ai_response_streaming(channel_id, response_generator)
+                    # Получаем chunked response generator от AI Agent
+                    chunked_generator = self.agent.get_chunked_response_generator(
+                        normalized_text,
+                        session_id,
+                    )
+
+                    # Обрабатываем AI ответы через Parallel TTS Processor
+                    await self.process_chunked_ai_response(channel_id, chunked_generator)
                     
                     # Ждем завершения filler
                     await filler_task
@@ -363,10 +364,13 @@ class OptimizedAsteriskAIHandler:
                 return
             
             # Итерируем chunked generator
-            async for chunk_data in chunked_generator:
+            for chunk_data in chunked_generator:
+                if not chunk_data:
+                    continue
+
                 # Запускаем TTS каждого чанка НЕМЕДЛЕННО (параллельно)
                 await self.parallel_tts.process_chunk_immediate(channel_id, chunk_data)
-                
+
                 # Логируем критическую метрику
                 if chunk_data.get("is_first"):
                     first_chunk_time = time.time() - self.active_calls[channel_id]["performance_start"]
