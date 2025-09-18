@@ -290,7 +290,7 @@ class OptimizedAsteriskAIHandler:
 
                 # Обновляем VAD активность при получении ASR результата
                 if self.vad_enabled and self.vad_service:
-                    await self.vad_service.update_activity(channel_id)
+                    self.vad_service.update_activity(channel_id)
 
                 # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем на пустой результат ASR
                 if not normalized_text or not normalized_text.strip():
@@ -828,7 +828,7 @@ class OptimizedAsteriskAIHandler:
                 
                 # Отключаем VAD мониторинг во время воспроизведения
                 if self.vad_enabled and self.vad_service:
-                    await self.vad_service.stop_monitoring(channel_id)
+                    self.vad_service.stop_monitoring(channel_id)
                     logger.info(f"🎯 VAD мониторинг отключен для {channel_id} (начало воспроизведения)")
     
     async def handle_playback_finished(self, event):
@@ -902,7 +902,7 @@ class OptimizedAsteriskAIHandler:
                     
                     # Запускаем VAD мониторинг для уменьшения паузы
                     if self.vad_enabled and self.vad_service:
-                        vad_success = await self.vad_service.start_monitoring(
+                        vad_success = self.vad_service.start_monitoring(
                             channel_id, 
                             recording_id, 
                             self._on_vad_recording_finished
@@ -1005,7 +1005,7 @@ class OptimizedAsteriskAIHandler:
                 
                 # Останавливаем VAD мониторинг
                 if self.vad_service:
-                    await self.vad_service.stop_monitoring(channel_id)
+                    self.vad_service.stop_monitoring(channel_id)
             
             # Обрабатываем записанную речь
             if channel_id in self.active_calls:
