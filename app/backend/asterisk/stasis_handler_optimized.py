@@ -265,10 +265,21 @@ class OptimizedAsteriskAIHandler:
         try:
             logger.info(f"🎯 ОПТИМИЗИРОВАННАЯ обработка речи для канала {channel_id}")
             
-            # ЭТАП 1.2: Проверка размера аудио файла перед ASR
+            # ЭТАП 1.2: Ожидание создания аудио файла (Asterisk может создавать с задержкой)
+            max_wait_time = 5.0  # Максимум 5 секунд ожидания
+            wait_interval = 0.1  # Проверяем каждые 100мс
+            waited_time = 0.0
+            
+            while not os.path.exists(audio_path) and waited_time < max_wait_time:
+                await asyncio.sleep(wait_interval)
+                waited_time += wait_interval
+                
             if not os.path.exists(audio_path):
-                logger.warning(f"⚠️ Аудио файл не найден: {audio_path}")
+                logger.warning(f"⚠️ Аудио файл не найден после ожидания {waited_time:.1f}с: {audio_path}")
                 return
+                
+            if waited_time > 0:
+                logger.info(f"⏳ Аудио файл создан через {waited_time:.1f}с: {audio_path}")
                 
             file_size = os.path.getsize(audio_path)
             if file_size < 1000:  # Минимальный размер 1KB
@@ -290,7 +301,7 @@ class OptimizedAsteriskAIHandler:
 
                 # Обновляем VAD активность при получении ASR результата
                 if self.vad_enabled and self.vad_service:
-                    self.vad_service.update_activity(channel_id)
+                    await self.vad_service.update_activity(channel_id)
 
                 # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем на пустой результат ASR
                 if not normalized_text or not normalized_text.strip():
@@ -299,7 +310,7 @@ class OptimizedAsteriskAIHandler:
 
                 # Удалена умная фильтрация речи - используем только VAD систему
 
-                # Добавляем в транскрипт
+                # Добавляем в транскрипт (как в старом Voximplant проекте)
                 call_data["transcript"].append({
                     "speaker": "user",
                     "text": normalized_text,
@@ -326,13 +337,50 @@ class OptimizedAsteriskAIHandler:
                     response_generator = self.agent.get_response_generator(normalized_text, session_id)
                     
                     # Обрабатываем AI ответы через оригинальный метод
-                    await self.process_ai_response_streaming(channel_id, response_generator)
+                    full_response = await self.process_ai_response_streaming(channel_id, response_generator)
+                    
+                    # Добавляем ответ бота в транскрипт (как в старом Voximplant проекте)
+                    if full_response:
+                        call_data["transcript"].append({
+                            "speaker": "bot",
+                            "text": full_response,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
                     
                     total_time = time.time() - overall_start
                     logger.info(f"✅ ОПТИМИЗИРОВАННАЯ обработка завершена: {total_time:.2f}s")
                     
                     # Логируем метрики
                     self._log_performance_metrics(channel_id, total_time)
+                    
+                    # СОХРАНЯЕМ ЛОГ СРАЗУ ПОСЛЕ ОТВЕТА AI (как в старом Voximplant проекте)
+                    logger.info(f"💾 Сохраняем лог для канала {channel_id}")
+                    try:
+                        from app.backend.services.log_storage import insert_log
+                        
+                        # Получаем данные звонка
+                        call_data = self.active_calls.get(channel_id, {})
+                        if call_data:
+                            log_record = {
+                                "id": channel_id,
+                                "callerId": call_data.get("caller_id", "unknown"),
+                                "startTime": call_data.get("start_time", datetime.now(timezone.utc).isoformat()),
+                                "endTime": datetime.now(timezone.utc).isoformat(),
+                                "status": "Completed",
+                                "transcript": call_data.get("transcript", [])
+                            }
+                            
+                            await insert_log(log_record)
+                            logger.info(f"✅ Лог успешно сохранён для канала {channel_id}")
+                        else:
+                            logger.warning(f"⚠️ Нет данных звонка для канала {channel_id}")
+                    except Exception as log_error:
+                        logger.error(f"❌ Ошибка сохранения лога: {log_error}", exc_info=True)
+                    
+                    # НЕ ВЫХОДИМ ИЗ STASIS - остаемся для продолжения диалога
+                    logger.info(f"🔄 Остаемся в Stasis для продолжения диалога канала {channel_id}")
+                    # async with AsteriskARIClient() as ari:
+                    #     await ari.stasis_exit(channel_id)
                     
                 except Exception as ai_error:
                     logger.error(f"❌ Ошибка оптимизированного AI: {ai_error}", exc_info=True)
@@ -402,9 +450,10 @@ class OptimizedAsteriskAIHandler:
         logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ STASIS: Начинаем обработку AI response для канала {channel_id}")
         
         if channel_id not in self.active_calls:
-            return
+            return ""
         
         call_data = self.active_calls[channel_id]
+        full_response = ""  # Накапливаем полный ответ
         
         # Накапливаем chunks от AI Agent
         first_chunk = True
@@ -419,6 +468,7 @@ class OptimizedAsteriskAIHandler:
             if chunk:
                 chunk_count += 1
                 call_data["response_buffer"] += chunk
+                full_response += chunk  # Накапливаем полный ответ
                 
                 # Проигрываем каждое завершённое предложение по | (как в Voximplant)
                 while "|" in call_data["response_buffer"]:
@@ -441,6 +491,8 @@ class OptimizedAsteriskAIHandler:
         
         total_stasis_time = time.time() - stasis_start
         logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ STASIS: Обработка AI response заняла {total_stasis_time:.3f}с, чанков: {chunk_count}")
+        
+        return full_response  # Возвращаем полный ответ для транскрипта
     
     async def flush_response_buffer(self, channel_id: str):
         """Страховочный таймер для остатка без | (из оригинальной версии)."""
@@ -891,7 +943,7 @@ class OptimizedAsteriskAIHandler:
                     
                     # Запускаем VAD мониторинг для уменьшения паузы
                     if self.vad_enabled and self.vad_service:
-                        vad_success = self.vad_service.start_monitoring(
+                        vad_success = await self.vad_service.start_monitoring(
                             channel_id, 
                             recording_id, 
                             self._on_vad_recording_finished
@@ -994,7 +1046,7 @@ class OptimizedAsteriskAIHandler:
                 
                 # Останавливаем VAD мониторинг
                 if self.vad_service:
-                    self.vad_service.stop_monitoring(channel_id)
+                    await self.vad_service.stop_monitoring(channel_id)
             
             # Обрабатываем записанную речь
             if channel_id in self.active_calls:

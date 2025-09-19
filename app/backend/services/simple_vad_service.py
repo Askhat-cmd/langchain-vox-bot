@@ -299,3 +299,4 @@ def get_vad_service() -> SimpleVADService:
         logger.info("✅ SimpleVADService создан с конфигурацией из .env")
     
     return _vad_service
+

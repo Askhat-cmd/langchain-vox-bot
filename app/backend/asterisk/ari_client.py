@@ -225,6 +225,28 @@ class AsteriskARIClient:
         except Exception as e:
             logger.warning(f"⚠️ Ошибка разблокировки канала {channel_id}: {e}")
             return False
+    
+    async def stasis_exit(self, channel_id):
+        """Выводит канал из Stasis приложения"""
+        try:
+            # Правильный URL для выхода из Stasis
+            url = f"{self.base_url}/channels/{channel_id}/continue"
+            data = {
+                "context": "default",
+                "extension": "h",
+                "priority": 1
+            }
+            async with self.session.post(url, json=data) as response:
+                if response.status == 204:
+                    logger.info(f"🚪 Канал {channel_id} успешно выведен из Stasis")
+                    return True
+                else:
+                    error_text = await response.text()
+                    logger.warning(f"⚠️ Не удалось вывести канал {channel_id} из Stasis: {response.status} - {error_text}")
+                    return False
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка вывода канала {channel_id} из Stasis: {e}")
+            return False
 
 if __name__ == "__main__":
     async def test():
