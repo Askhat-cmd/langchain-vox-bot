@@ -218,18 +218,22 @@ chmod 755 /usr/share/asterisk/sounds/ru
 
 | Компонент | Назначение |
 |---|---|
-| `app/backend/asterisk/stasis_handler.py` | **Основной обработчик** Asterisk ARI WebSocket |
+| `app/backend/asterisk/stasis_handler_optimized.py` | **🚀 ГЛАВНЫЙ ОБРАБОТЧИК** Asterisk ARI WebSocket |
 | `app/backend/asterisk/ari_client.py` | Клиент для работы с Asterisk ARI API |
 | `app/backend/rag/agent.py` | LangChain-агент: RAG, маршрутизация general/tech |
 | `app/backend/services/yandex_tts_service.py` | Yandex TTS (gRPC + HTTP fallback) |
-| `app/backend/services/asr_service.py` | ✅ Yandex SpeechKit ASR (автообновление токенов) |
+| `app/backend/services/yandex_asr_service.py` | ✅ Yandex SpeechKit ASR (автообновление токенов) |
+| `app/backend/services/simple_vad_service.py` | 🎯 VAD система для уменьшения паузы |
+| `app/backend/services/parallel_tts.py` | Параллельная обработка TTS чанков |
+| `app/backend/services/barge_in_manager.py` | Управление прерыванием речи |
+| `app/backend/services/performance_monitor.py` | Мониторинг производительности |
 | `scripts/create_embeddings.py` | Скрипт для создания/пересоздания базы векторов |
 | `app/frontend/logs-ui/` | Веб-интерфейс для администрирования |
+| `app/backend/main.py` | FastAPI сервер (HTTP/WS, статика) |
 | `.env` | Файл конфигурации (API ключи, пути к файлам) |
 
 ### 🔄 **УСТАРЕВШИЕ КОМПОНЕНТЫ (после миграции):**
-- ❌ `app/backend/main.py` - старый WebSocket сервер для Voximplant
-- ❌ `app/voximplant/scenario_barge-in_2.js` - Voximplant сценарий
+- ❌ `app/voximplant/scenario_barge-in_2.js` - Voximplant сценарий (backup)
 
 
 ---
@@ -270,7 +274,7 @@ source venv/bin/activate
 sudo systemctl start metrotech-bot
 
 # 3. Запуск основного обработчика звонков
-python app/backend/asterisk/stasis_handler.py
+python app/backend/asterisk/stasis_handler_optimized.py
 
 # 4. Проверка статуса
 sudo systemctl status metrotech-bot
@@ -386,8 +390,7 @@ python -m grpc_tools.protoc --python_out=. *.proto
 │   ├── backend/
 │   │   ├── asterisk/            # 🎯 ОСНОВНЫЕ КОМПОНЕНТЫ ASTERISK
 │   │   │   ├── stasis_handler_optimized.py  # 🚀 ГЛАВНЫЙ ОБРАБОТЧИК ARI WebSocket
-│   │   │   ├── ari_client.py    # Клиент для работы с Asterisk ARI API
-│   │   │   └── stasis_handler.py  # Оригинальный обработчик (backup)
+│   │   │   └── ari_client.py    # Клиент для работы с Asterisk ARI API
 │   │   ├── rag/
 │   │   │   └── agent.py         # AI-агент (LangChain + RAG + Chroma)
 │   │   ├── services/            # 🔧 СЕРВИСЫ ОБРАБОТКИ
@@ -397,16 +400,25 @@ python -m grpc_tools.protoc --python_out=. *.proto
 │   │   │   ├── yandex_grpc_tts.py     # gRPC TTS сервис
 │   │   │   ├── tts_adapter.py   # Адаптер TTS с fallback логикой
 │   │   │   ├── parallel_tts.py  # Параллельная обработка TTS чанков
+│   │   │   ├── sequential_tts.py # Последовательная обработка TTS
 │   │   │   ├── filler_tts.py    # Instant filler TTS для быстрого отклика
-│   │   │   └── log_storage.py   # Хранение логов
+│   │   │   ├── simple_vad_service.py  # 🎯 VAD система для уменьшения паузы
+│   │   │   ├── barge_in_manager.py    # Управление прерыванием речи
+│   │   │   ├── performance_monitor.py # Мониторинг производительности
+│   │   │   ├── error_handler.py       # Обработка ошибок
+│   │   │   ├── log_storage.py   # Хранение логов
+│   │   │   └── yandex/          # 📦 YANDEX CLOUD SDK
+│   │   │       └── cloud/       # Полный SDK Yandex Cloud (gRPC)
 │   │   ├── utils/
 │   │   │   └── text_normalizer.py  # Нормализация текста
 │   │   └── main.py              # FastAPI сервер (HTTP/WS, статика)
-│   └── frontend/logs-ui/        # 🌐 ВЕБ-АДМИНКА
-│       ├── index.html           # Главная страница
-│       ├── script.js            # JavaScript логика
-│       ├── style.css            # Стили
-│       └── instruction.md       # Инструкция по настройке
+│   ├── frontend/logs-ui/        # 🌐 ВЕБ-АДМИНКА
+│   │   ├── index.html           # Главная страница
+│   │   ├── script.js            # JavaScript логика
+│   │   ├── style.css            # Стили
+│   │   └── instruction.md       # Инструкция по настройке
+│   └── voximplant/              # 📞 VOXIMPLANT (УСТАРЕЛО)
+│       └── scenario_barge-in_2.js  # Сценарий Voximplant (backup)
 ├── scripts/
 │   ├── create_embeddings.py     # Создание/пересоздание базы векторов
 │   └── test_agent.py            # Тестирование AI агента
@@ -414,11 +426,13 @@ python -m grpc_tools.protoc --python_out=. *.proto
 │   └── prompts.json             # Промпты для AI агента
 ├── kb/                          # 📚 БАЗЫ ЗНАНИЙ
 │   ├── general.md               # Общая база знаний
-│   └── tech.md                  # Техническая база знаний
+│   ├── tech.md                  # Техническая база знаний
+│   └── backups/                 # Резервные копии БЗ
 ├── data/                        # 💾 ДАННЫЕ
 │   ├── chroma/                  # Персистентное хранилище Chroma
 │   ├── db/log_db.sqlite         # SQLite логи звонков
-│   └── logs/app.log             # Логи приложения
+│   ├── logs/app.log             # Логи приложения
+│   └── audio/                   # Временные аудио файлы
 ├── memory-bank/                 # 🧠 MEMORY BANK (документация)
 │   ├── tasks.md                 # Активные задачи
 │   ├── activeContext.md         # Активный контекст
@@ -431,6 +445,14 @@ python -m grpc_tools.protoc --python_out=. *.proto
 │   ├── creative/                # Документы творческой фазы
 │   ├── reflection/              # Рефлексии по задачам
 │   └── archive/                 # Архив завершенных задач
+├── custom_modes/                # 🎯 CUSTOM MODES (документация)
+│   ├── creative_instructions.md
+│   ├── implement_instructions.md
+│   ├── plan_instructions.md
+│   ├── reflect_archive_instructions.md
+│   └── van_instructions.md
+├── docs/                        # 📖 ДОКУМЕНТАЦИЯ
+│   └── Словарь-глосарий.txt     # Глосарий терминов
 ├── .env                         # 🔑 КОНФИГУРАЦИЯ
 ├── requirements.txt             # Python зависимости
 ├── README.md                    # Документация проекта
@@ -446,12 +468,21 @@ python -m grpc_tools.protoc --python_out=. *.proto
 - `agent.py` - **AI агент с RAG**
 
 **🔧 Сервисы оптимизации:**
+- `simple_vad_service.py` - **🎯 VAD система** для уменьшения паузы
 - `parallel_tts.py` - Параллельная обработка TTS
+- `sequential_tts.py` - Последовательная обработка TTS
 - `filler_tts.py` - Instant filler для быстрого отклика
 - `tts_adapter.py` - Адаптер с fallback логикой
+- `barge_in_manager.py` - Управление прерыванием речи
+- `performance_monitor.py` - Мониторинг производительности
+
+**📦 Yandex Cloud SDK:**
+- `yandex/cloud/` - Полный SDK Yandex Cloud (gRPC)
+- `yandex_grpc_tts.py` - gRPC TTS сервис
 
 **📚 Документация:**
 - `memory-bank/` - Полная документация проекта
+- `custom_modes/` - Инструкции для режимов работы
 - `Текущее_состояние_проекта.md` - Актуальный статус
 
 ---
