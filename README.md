@@ -270,10 +270,10 @@ chmod 755 /usr/share/asterisk/sounds/ru
 cd /root/Asterisk_bot/asterisk-vox-bot
 source venv/bin/activate
 
-# 2. Запуск AI бота (systemd)
+# 2. Запуск AI бота (systemd) - порт 9000
 sudo systemctl start metrotech-bot
 
-# 3. Запуск основного обработчика звонков
+# 3. Запуск основного обработчика звонков (подключается к Asterisk ARI:8088)
 python app/backend/asterisk/stasis_handler_optimized.py
 
 # 4. Проверка статуса
@@ -281,9 +281,11 @@ sudo systemctl status metrotech-bot
 ps aux | grep stasis_handler
 ```
 
-### Веб-интерфейс:
+### 🌐 **Веб-интерфейс и API:**
 - **Админ-панель**: http://localhost:9000/logs-ui/
-- **API**: http://localhost:9000/
+- **API документация**: http://localhost:9000/docs
+- **API endpoints**: http://localhost:9000/api/
+- **Asterisk ARI**: http://localhost:8088/ari/
 
 ### Технические требования для оптимизации:
 ```bash
@@ -484,6 +486,39 @@ python -m grpc_tools.protoc --python_out=. *.proto
 - `memory-bank/` - Полная документация проекта
 - `custom_modes/` - Инструкции для режимов работы
 - `Текущее_состояние_проекта.md` - Актуальный статус
+
+---
+
+## 🌐 Порты и сервисы
+
+| Сервис | Порт | Протокол | Назначение |
+|---|---|---|---|
+| **FastAPI Admin** | `9000` | HTTP/WebSocket | 🌐 Веб-интерфейс админки и API |
+| **Asterisk ARI** | `8088` | HTTP/WebSocket | 📞 REST API для управления звонками |
+| **Asterisk AMI** | `5038` | TCP | 📞 Manager Interface (не используется) |
+| **Asterisk SIP** | `5060` | UDP | 📞 SIP протокол для звонков |
+| **Asterisk RTP** | `10000-20000` | UDP | 🎵 RTP аудио потоки |
+| **Redis** | `6379` | TCP | 💾 Кеширование embeddings |
+| **SQLite** | - | Файл | 💾 База данных логов |
+
+### 🔗 **URL-адреса:**
+- **Админ-панель**: http://localhost:9000/logs-ui/
+- **API документация**: http://localhost:9000/docs
+- **API endpoints**: http://localhost:9000/api/
+- **Asterisk ARI**: http://localhost:8088/ari/
+- **WebSocket (устарел)**: ws://localhost:9000/ws
+
+### ⚙️ **Конфигурация портов:**
+```bash
+# FastAPI (main.py)
+uvicorn app.backend.main:app --host 0.0.0.0 --port 9000
+
+# Asterisk ARI (ari_client.py)
+host="localhost", port=8088
+
+# Redis (если используется)
+redis://localhost:6379
+```
 
 ---
 
@@ -763,9 +798,14 @@ ws.onopen = () => ws.send("Здравствуйте!");
 - Внутри него указаны:
   - `WorkingDirectory` — папка проекта: `/root/Asterisk_bot/asterisk-vox-bot`;
   - `Environment` — какой `PATH` (наш `venv`): `/root/Asterisk_bot/asterisk-vox-bot/venv/bin`;
-  - `ExecStart` — команда старта (gunicorn на порту 9000):
+  - `ExecStart` — команда старта (gunicorn на порту **9000**):
     - `/root/Asterisk_bot/asterisk-vox-bot/venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:9000 app.backend.main:app`
   - `Restart=always` — перезапускать при сбоях.
+
+### 🌐 **Порты в systemd конфигурации:**
+- **FastAPI сервер**: порт `9000` (HTTP/WebSocket)
+- **Asterisk ARI**: порт `8088` (подключается stasis_handler_optimized.py)
+- **Asterisk SIP**: порт `5060` (для входящих звонков)
 
 Важно: unit‑файл лежит вне репозитория (в `/etc/systemd/system/`). Сам код и все настройки (.env, БЗ, статика) — внутри проекта в `/root/Asterisk_bot/asterisk-vox-bot`.
 
@@ -886,7 +926,9 @@ sudo systemctl restart metrotech-bot
 - Пустая админка / ошибки загрузки React:
   - В `logs-ui/index.html` используется importmap с CDN `jsdelivr` для ESM. Если сеть ограничена, соберите мини‑бандл локально или используйте другой доступный CDN.
 - `Address already in use` при старте:
-  - Освободите порт: `lsof -ti :9000 | xargs -r kill -9` и запустите снова.
+  - **Порт 9000 занят**: `lsof -ti :9000 | xargs -r kill -9` и запустите снова
+  - **Порт 8088 занят** (Asterisk ARI): проверьте `systemctl status asterisk`
+  - **Порт 5060 занят** (SIP): проверьте конфигурацию Asterisk
 - `OPENAI_API_KEY` не задан:
   - Убедитесь, что ключ в `.env`, и перезапустите процесс.
 - После загрузки новой БЗ ответы не меняются:
