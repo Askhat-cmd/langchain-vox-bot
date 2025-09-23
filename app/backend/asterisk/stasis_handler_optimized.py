@@ -104,6 +104,9 @@ class OptimizedAsteriskAIHandler:
         # Метрики производительности
         self.performance_metrics = {}
         
+        # Мониторинг состояния каналов
+        self.channel_monitor_task = None
+        
         logger.info("🚀 OptimizedAsteriskAIHandler инициализирован")
     
     async def initialize_optimization_services(self):
@@ -169,7 +172,7 @@ class OptimizedAsteriskAIHandler:
             "caller_id": caller_id,
             "start_time": start_time.isoformat(),
             "transcript": [],
-            "status": "Started",
+            "status": "InProgress",
             
             # Оптимизированные данные
             "response_buffer": "",
@@ -245,6 +248,11 @@ class OptimizedAsteriskAIHandler:
         if call_data.get("status") == "Completed":
             logger.info(f"🚫 Канал {channel_id} уже завершен, пропускаем обработку речи")
             return
+        
+        # Сбрасываем таймер завершения при новой активности
+        if "timeout_task" in call_data:
+            call_data["timeout_task"].cancel()
+            logger.info(f"⏰ Таймер завершения сброшен для {channel_id} - новая активность")
 
         # Проверяем, не обрабатывается ли уже эта запись
         if call_data.get("processing_speech", False):
@@ -287,6 +295,7 @@ class OptimizedAsteriskAIHandler:
                 # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем на пустой результат ASR
                 if not normalized_text or not normalized_text.strip():
                     logger.warning(f"⚠️ ASR вернул пустой результат, пропускаем обработку")
+                    # Не завершаем звонок при пустом ASR - возможно пользователь еще говорит
                     return
 
                 # 🧠 УМНАЯ ФИЛЬТРАЦИЯ: Проверяем информативность речи
@@ -357,6 +366,30 @@ class OptimizedAsteriskAIHandler:
                     
                     # Логируем метрики
                     self._log_performance_metrics(channel_id, total_time)
+                    
+                    # Добавляем ответ бота в транскрипт (если есть накопленный ответ)
+                    if channel_id in self.active_calls:
+                        call_data = self.active_calls[channel_id]
+                        bot_response = call_data.get("bot_response", "")
+                        if bot_response:
+                            call_data["transcript"].append({
+                                "speaker": "bot",
+                                "text": bot_response,
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            })
+                            # Очищаем накопленный ответ
+                            call_data["bot_response"] = ""
+                    
+                    # Сохраняем лог после каждого ответа (так как ChannelDestroyed не приходит)
+                    await self._save_call_log_forced(channel_id)
+                    
+                    # НЕ устанавливаем статус "Completed" после ответа - звонок продолжается
+                    # Статус "Completed" будет установлен только при реальном завершении звонка
+                    logger.info(f"✅ Ответ AI завершен, готов к следующему вопросу от {channel_id}")
+                    
+                    # Запускаем таймер для автоматического завершения звонка через 30 секунд бездействия
+                    # Таймер будет сброшен при новом вопросе
+                    await self._start_call_timeout(channel_id)
                     
                 except Exception as ai_error:
                     logger.error(f"❌ Ошибка оптимизированного AI: {ai_error}", exc_info=True)
@@ -430,6 +463,10 @@ class OptimizedAsteriskAIHandler:
         
         call_data = self.active_calls[channel_id]
         
+        # Инициализируем накопление ответа бота
+        if "bot_response" not in call_data:
+            call_data["bot_response"] = ""
+        
         # Накапливаем chunks от AI Agent
         first_chunk = True
         chunk_count = 0
@@ -443,6 +480,7 @@ class OptimizedAsteriskAIHandler:
             if chunk:
                 chunk_count += 1
                 call_data["response_buffer"] += chunk
+                call_data["bot_response"] += chunk  # Накопляем полный ответ бота
                 
                 # Проигрываем каждое завершённое предложение по | (как в Voximplant)
                 while "|" in call_data["response_buffer"]:
@@ -714,7 +752,11 @@ class OptimizedAsteriskAIHandler:
                 response_generator = self.agent.get_response_generator(user_text, self.active_calls[channel_id]["session_id"])
                 await self.process_ai_response_streaming_old(channel_id, response_generator)
             else:
-                await self.speak_queued(channel_id, "Извините, произошла ошибка в системе")
+                error_text = "Извините, произошла ошибка в системе"
+                # Накопляем ответ бота
+                if channel_id in self.active_calls:
+                    self.active_calls[channel_id]["bot_response"] = error_text
+                await self.speak_queued(channel_id, error_text)
                 
         except Exception as e:
             logger.error(f"❌ Fallback system error: {e}")
@@ -747,11 +789,159 @@ class OptimizedAsteriskAIHandler:
         
         logger.info(f"📊 Performance metrics for {channel_id}: {metrics}")
 
+    async def _start_call_timeout(self, channel_id):
+        """Запускает таймер для автоматического завершения звонка через 30 секунд бездействия"""
+        try:
+            # Отменяем предыдущий таймер если есть
+            if channel_id in self.active_calls and "timeout_task" in self.active_calls[channel_id]:
+                self.active_calls[channel_id]["timeout_task"].cancel()
+            
+            # Создаем новый таймер
+            timeout_task = asyncio.create_task(self._call_timeout_handler(channel_id))
+            if channel_id in self.active_calls:
+                self.active_calls[channel_id]["timeout_task"] = timeout_task
+                logger.info(f"⏰ Таймер завершения звонка запущен для {channel_id} (30 сек)")
+        except Exception as e:
+            logger.error(f"❌ Ошибка запуска таймера звонка: {e}")
+    
+    async def _call_timeout_handler(self, channel_id):
+        """Обработчик таймаута звонка"""
+        try:
+            await asyncio.sleep(30)  # Ждем 30 секунд
+            
+            if channel_id in self.active_calls:
+                call_data = self.active_calls[channel_id]
+                if call_data.get("status") != "Completed":
+                    logger.info(f"⏰ Таймаут звонка {channel_id} - завершаем автоматически")
+                    call_data["status"] = "Completed"
+                    
+                    # Сохраняем финальный лог
+                    await self._save_call_log_forced(channel_id)
+                    
+                    # Удаляем из активных звонков
+                    del self.active_calls[channel_id]
+                    if channel_id in self.performance_metrics:
+                        del self.performance_metrics[channel_id]
+                    
+                    logger.info(f"✅ Звонок {channel_id} автоматически завершен по таймауту")
+        except asyncio.CancelledError:
+            logger.info(f"⏰ Таймер звонка {channel_id} отменен")
+        except Exception as e:
+            logger.error(f"❌ Ошибка в таймере звонка {channel_id}: {e}")
+
+    async def _complete_all_active_calls(self):
+        """Завершает все активные звонки при разрыве WebSocket соединения"""
+        logger.info(f"📞 Завершаем {len(self.active_calls)} активных звонков")
+        
+        for channel_id, call_data in list(self.active_calls.items()):
+            try:
+                if call_data.get("status") != "Completed":
+                    logger.info(f"✅ Завершаем звонок {channel_id} - клиент положил трубку")
+                    call_data["status"] = "Completed"
+                    
+                    # Сохраняем финальный лог
+                    await self._save_call_log_forced(channel_id)
+                    
+                    # Удаляем из активных звонков
+                    del self.active_calls[channel_id]
+                    if channel_id in self.performance_metrics:
+                        del self.performance_metrics[channel_id]
+                    
+                    logger.info(f"✅ Звонок {channel_id} завершен - клиент положил трубку")
+            except Exception as e:
+                logger.error(f"❌ Ошибка завершения звонка {channel_id}: {e}")
+        
+        logger.info("✅ Все активные звонки завершены")
+
+    async def _monitor_channels(self):
+        """Мониторинг состояния каналов для детекции разрыва соединения"""
+        while True:
+            try:
+                await asyncio.sleep(30)  # Проверяем каждые 30 секунд
+                
+                if not self.active_calls:
+                    continue
+                
+                # Проверяем состояние каждого активного канала
+                for channel_id in list(self.active_calls.keys()):
+                    try:
+                        async with AsteriskARIClient() as ari:
+                            # Получаем информацию о канале
+                            channel_info = await ari.get_channel_info(channel_id)
+                            
+                            if not channel_info or channel_info.get('state') in ['Down', 'Ringing']:
+                                # Канал недоступен или завершен
+                                logger.info(f"📞 Канал {channel_id} недоступен - завершаем звонок")
+                                await self._complete_single_call(channel_id, "channel_unavailable")
+                                
+                    except Exception as e:
+                        # Если не можем получить информацию о канале, считаем что он завершен
+                        logger.info(f"📞 Канал {channel_id} недоступен (ошибка: {e}) - завершаем звонок")
+                        await self._complete_single_call(channel_id, "channel_error")
+                        
+            except asyncio.CancelledError:
+                logger.info("🛑 Мониторинг каналов остановлен")
+                break
+            except Exception as e:
+                logger.error(f"❌ Ошибка мониторинга каналов: {e}")
+                await asyncio.sleep(10)  # Пауза при ошибке
+
+    async def _complete_single_call(self, channel_id: str, reason: str):
+        """Завершает один конкретный звонок"""
+        if channel_id not in self.active_calls:
+            return
+            
+        try:
+            call_data = self.active_calls[channel_id]
+            if call_data.get("status") != "Completed":
+                logger.info(f"✅ Завершаем звонок {channel_id} - {reason}")
+                call_data["status"] = "Completed"
+                
+                # Сохраняем финальный лог
+                await self._save_call_log_forced(channel_id)
+                
+                # Удаляем из активных звонков
+                del self.active_calls[channel_id]
+                if channel_id in self.performance_metrics:
+                    del self.performance_metrics[channel_id]
+                
+                logger.info(f"✅ Звонок {channel_id} завершен - {reason}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка завершения звонка {channel_id}: {e}")
+
+    async def _save_call_log_forced(self, channel_id):
+        """Принудительно сохраняет лог звонка после каждого ответа AI (так как ChannelDestroyed не приходит)"""
+        if channel_id not in self.active_calls:
+            return
+            
+        call_data = self.active_calls[channel_id]
+        end_time = datetime.now(timezone.utc)
+        
+        # Сохраняем текущий статус без изменения
+        # Статус "Completed" будет установлен только при реальном завершении звонка
+        current_status = call_data.get("status", "InProgress")
+        logger.info(f"💾 Сохраняем лог со статусом: {current_status}")
+        
+        try:
+            log_record = {
+                "id": call_data["session_id"],
+                "callerId": call_data["caller_id"],
+                "startTime": call_data["start_time"],
+                "endTime": end_time.isoformat(),
+                "status": current_status,
+                "transcript": call_data.get("transcript", []),
+                "performance_metrics": self.performance_metrics.get(channel_id, {})
+            }
+            await insert_log(log_record)
+            logger.info(f"💾 Лог сохранён для Session {call_data['session_id']}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка insert_log: {e}", exc_info=True)
+    
     # Остальные методы из оригинального StasisHandler...
     # (handle_channel_destroyed, clean_text, и т.д.)
     
     async def handle_channel_destroyed(self, event):
-        """Обрабатывает завершение звонка"""
+        """Обрабатывает завершение звонка (как в старом проекте)"""
         channel_id = event.get('channel', {}).get('id')
         
         if channel_id in self.active_calls:
@@ -761,7 +951,7 @@ class OptimizedAsteriskAIHandler:
             
             logger.info(f"📞 Звонок завершен: {channel_id}")
             
-            # Сохраняем лог звонка
+            # Сохраняем лог звонка (как в старом проекте)
             try:
                 log_record = {
                     "id": call_data["session_id"],
@@ -773,9 +963,9 @@ class OptimizedAsteriskAIHandler:
                     "performance_metrics": self.performance_metrics.get(channel_id, {})
                 }
                 await insert_log(log_record)
-                logger.info(f"💾 Лог сохранен для звонка {call_data['session_id']}")
+                logger.info(f"💾 Лог сохранён для Session {call_data['session_id']}")
             except Exception as e:
-                logger.error(f"❌ Ошибка сохранения лога: {e}")
+                logger.error(f"❌ Ошибка insert_log: {e}", exc_info=True)
             
             # Удаляем из активных звонков
             del self.active_calls[channel_id]
@@ -795,6 +985,9 @@ class OptimizedAsteriskAIHandler:
             async with websockets.connect(self.ws_url) as websocket:
                 logger.info("✅ Подключен к Asterisk ARI WebSocket")
                 
+                # Запускаем мониторинг каналов
+                self.channel_monitor_task = asyncio.create_task(self._monitor_channels())
+                
                 async for message in websocket:
                     try:
                         event = json.loads(message)
@@ -805,9 +998,19 @@ class OptimizedAsteriskAIHandler:
                         logger.error(f"❌ Ошибка обработки события: {e}", exc_info=True)
                         
         except websockets.exceptions.ConnectionClosed:
-            logger.warning("🔌 WebSocket соединение закрыто")
+            logger.warning("🔌 WebSocket соединение закрыто - завершаем все активные звонки")
+            await self._complete_all_active_calls()
         except Exception as e:
             logger.error(f"❌ Критическая ошибка WebSocket: {e}", exc_info=True)
+            await self._complete_all_active_calls()
+        finally:
+            # Останавливаем мониторинг каналов
+            if self.channel_monitor_task:
+                self.channel_monitor_task.cancel()
+                try:
+                    await self.channel_monitor_task
+                except asyncio.CancelledError:
+                    pass
     
     async def handle_event(self, event):
         """Обрабатывает события от Asterisk ARI"""
@@ -866,7 +1069,8 @@ class OptimizedAsteriskAIHandler:
                     logger.info(f"⚠️ Запись уже активна для канала {channel_id}, пропускаем запуск новой записи")
                     return
                 
-                # После завершения приветствия запускаем запись пользователя
+                # После завершения воспроизведения запускаем запись пользователя
+                # Звонок завершится только по таймауту (30 сек) или при разрыве соединения
                 await self.start_user_recording(channel_id)
     
     async def start_user_recording(self, channel_id: str):

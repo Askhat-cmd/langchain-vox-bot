@@ -194,6 +194,19 @@ class AsteriskARIClient:
             logger.debug(f"Канал {channel_id} не найден: {e}")
             return False
     
+    async def get_channel_info(self, channel_id):
+        """Получает информацию о канале."""
+        try:
+            url = f"{self.base_url}/channels/{channel_id}"
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    return None
+        except Exception as e:
+            logger.debug(f"Ошибка получения информации о канале {channel_id}: {e}")
+            return None
+    
     async def hold_channel(self, channel_id):
         """Принудительно удерживает канал для обработки"""
         try:

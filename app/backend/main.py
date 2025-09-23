@@ -16,6 +16,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
 from app.backend.rag.agent import Agent
 from app.backend.utils.text_normalizer import normalize as normalize_text
 from app.backend.services.log_storage import insert_log, query_logs, to_csv, delete_all_logs
@@ -499,3 +503,8 @@ async def websocket_endpoint(websocket: WebSocket, callerId: str = Query(None)):
                 logger.error(f"❌ Ошибка insert_log: {err}", exc_info=True)
 
             del active_calls[session_id]
+
+# --- Запуск сервера ---
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=9000)
