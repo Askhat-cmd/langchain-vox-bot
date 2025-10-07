@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Parallel TTS Processor для параллельной обработки чанков
 Цель: TTS каждого чанка запускается немедленно, параллельно с генерацией следующих
@@ -36,6 +36,7 @@ class ParallelTTSProcessor:
         """
         self.grpc_tts = grpc_tts
         self.ari_client = ari_client
+        self._ari_session = None  # Будет инициализирована при первом использовании
         
         # Конфигурация из .env
         self.tts_workers = int(os.getenv("TTS_PARALLEL_WORKERS", "3"))
@@ -80,11 +81,35 @@ class ParallelTTSProcessor:
             )
             
             self.tts_tasks[channel_id].append(tts_task)
+
+            # ✅ ВАЖНО: очищаем список активных задач по завершении
+            # Иначе в stasis_handler будет казаться, что задачи ещё идут,
+            # и VAD не запустится для следующего вопроса
+            tts_task.add_done_callback(lambda t, cid=channel_id: self._on_tts_task_done(cid, t))
             
             # Не ждем завершения TTS - обрабатываем следующий чанк
             
         except Exception as e:
             logger.error(f"❌ Immediate processing error chunk {chunk_num}: {e}")
+
+    def _on_tts_task_done(self, channel_id: str, task: asyncio.Task) -> None:
+        """Удаляет завершившуюся TTS задачу из реестра и логирует остаток."""
+        try:
+            # Снимем результат, чтобы не оставлять скрытые исключения
+            try:
+                task.result()
+            except Exception:
+                # Ошибку уже залогировали в месте выполнения
+                pass
+
+            if channel_id in self.tts_tasks:
+                before = len(self.tts_tasks[channel_id])
+                # Удаляем конкретно этот task
+                self.tts_tasks[channel_id] = [t for t in self.tts_tasks[channel_id] if t is not task]
+                after = len(self.tts_tasks[channel_id])
+                logger.info(f"🧹 TTS task cleanup: {before} → {after} active for {channel_id}")
+        except Exception as cleanup_error:
+            logger.debug(f"⚠️ Cleanup tts task error for {channel_id}: {cleanup_error}")
     
     async def _synthesize_chunk_async(self, channel_id: str, chunk_num: int, text: str, is_first: bool):
         """Async TTS + добавление в очередь воспроизведения"""
@@ -92,21 +117,17 @@ class ParallelTTSProcessor:
         tts_start = time.time()
         
         try:
-            # КРИТИЧНО: Проверяем канал перед TTS
-            if not await self.ari_client.channel_exists(channel_id):
-                logger.warning(f"⚠️ Канал {channel_id} не существует, пропускаем TTS chunk {chunk_num}")
-                return
+            # ✅ УБРАНА РАННЯЯ ПРОВЕРКА: gRPC TTS сразу!
+            # Проверка канала будет в _play_audio_chunk перед воспроизведением
             
             # gRPC TTS (параллельно с другими чанками)
             audio_data = await self.grpc_tts.synthesize_chunk_fast(text)
             tts_time = time.time() - tts_start
             
-            # Повторная проверка канала после TTS
-            if not await self.ari_client.channel_exists(channel_id):
-                logger.warning(f"⚠️ Канал {channel_id} закрылся во время TTS, пропускаем chunk {chunk_num}")
-                return
+            # ✅ ИСПРАВЛЕНО: НЕ проверяем канал здесь! Проверка будет в _play_audio_chunk()
+            # Причина: во время TTS канал может быть занят (VAD recording), что вызывает ложное срабатывание
             
-            logger.info(f"✅ TTS done for chunk {chunk_num}: {tts_time:.2f}s")
+            logger.info(f"✅ TTS done for chunk {chunk_num}: {tts_time:.2f}s, size={len(audio_data)} bytes")
             
             # Добавляем готовый аудио в очередь воспроизведения
             playback_item = {
@@ -138,12 +159,13 @@ class ParallelTTSProcessor:
             await self._process_playback_queue(channel_id)
     
     async def _process_playback_queue(self, channel_id: str):
-        """Последовательно воспроизводит готовые чанки"""
+        """Последовательно воспроизводит готовые чанки В ПРАВИЛЬНОМ ПОРЯДКЕ"""
         
         if self.playback_busy[channel_id]:
             return
             
         self.playback_busy[channel_id] = True
+        next_expected_chunk = 1  # Начинаем с chunk 1
         
         try:
             while self.playback_queues[channel_id]:
@@ -153,16 +175,32 @@ class ParallelTTSProcessor:
                     self.playback_queues[channel_id] = []
                     break
                 
-                # Берем следующий готовый чанк
+                # ✅ КРИТИЧНО: Ждем ИМЕННО нужный chunk по порядку!
+                if not self.playback_queues[channel_id]:
+                    break
+                
+                # Проверяем, готов ли следующий ожидаемый chunk
+                next_item = self.playback_queues[channel_id][0]
+                
+                if next_item["chunk_num"] != next_expected_chunk:
+                    # Нужный chunk еще не готов - ЖДЕМ немного
+                    await asyncio.sleep(0.05)
+                    continue
+                
+                # Берем следующий готовый чанк В ПРАВИЛЬНОМ ПОРЯДКЕ
                 item = self.playback_queues[channel_id].pop(0)
+                next_expected_chunk += 1
                 
                 # Воспроизводим через ARI
                 success = await self._play_audio_chunk(channel_id, item)
                 
                 # Логируем критическую метрику для первого чанка
+                # ✅ КРИТИЧНО: Логируем ТОЛЬКО ОДИН РАЗ за весь ответ (не за каждый вопрос!)
                 if item["is_first"]:
-                    logger.info(f"🎯 FIRST AUDIO PLAYED for {channel_id}")
-                    self._log_first_audio_metric(channel_id, item)
+                    # Проверяем, не логировали ли мы уже для этого ответа
+                    if channel_id not in self.performance_metrics or "first_audio_time" not in self.performance_metrics.get(channel_id, {}):
+                        logger.info(f"🎯 FIRST AUDIO PLAYED for {channel_id}")
+                        self._log_first_audio_metric(channel_id, item)
                 
                 if not success:
                     logger.warning("⚠️ Playback failed, stopping queue processing")
@@ -179,17 +217,45 @@ class ParallelTTSProcessor:
         try:
             play_start = time.time()
             
-            # В реальной реализации здесь будет вызов ARI для воспроизведения
-            # success = await self.ari_client.play_audio_data(channel_id, item["audio_data"])
+            # ✅ РЕАЛЬНОЕ ВОСПРОИЗВЕДЕНИЕ: Сохраняем WAV и играем через ARI
+            audio_data = item["audio_data"]
             
-            # ЗАГЛУШКА: Симулируем воспроизведение
-            await asyncio.sleep(0.1)  # Симулируем время воспроизведения
-            success = True
+            # Сохраняем в /usr/share/asterisk/sounds/ru/
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%H%M%S%f')[:-3]
+            sound_dir = os.getenv("ASTERISK_SOUNDS_DIR", "/usr/share/asterisk/sounds")
+            lang = os.getenv("ASTERISK_LANG", "ru")
+            
+            filename = f"chunk_{channel_id}_{timestamp}_{item['chunk_num']}.wav"
+            filepath = os.path.join(sound_dir, lang, filename)
+            
+            # Сохраняем WAV файл
+            with open(filepath, 'wb') as f:
+                f.write(audio_data)
+            
+            logger.info(f"💾 Saved chunk {item['chunk_num']}: {filepath} ({len(audio_data)} bytes)")
+            
+            # Извлекаем имя без расширения для ARI
+            sound_name = os.path.splitext(filename)[0]
+            
+            # ✅ ИСПРАВЛЕНО: Инициализируем ARI сессию если еще не создана
+            if not self.ari_client.session:
+                import aiohttp
+                self.ari_client.session = aiohttp.ClientSession(auth=self.ari_client.auth)
+            
+            logger.info(f"🎵 Воспроизводим chunk {item['chunk_num']}: {sound_name} (канал {channel_id})")
+            playback_id = await self.ari_client.play_sound(channel_id, sound_name, lang=lang)
             
             play_time = time.time() - play_start
             
-            if success:
+            if playback_id:
                 logger.info(f"🔊 Played chunk {item['chunk_num']}: {play_time:.2f}s - '{item['text'][:30]}...'")
+                
+                # Ждем завершения воспроизведения (приблизительно 1с аудио = 0.2с TTS)
+                # Для более точного ожидания можно парсить длину аудио из WAV
+                estimated_duration = len(audio_data) / 16000  # Примерная оценка для 8kHz
+                await asyncio.sleep(max(0.5, estimated_duration))
+                
                 return True
             else:
                 logger.error(f"❌ Failed to play chunk {item['chunk_num']}")
@@ -238,6 +304,11 @@ class ParallelTTSProcessor:
             
             # Сбрасываем флаг занятости
             self.playback_busy[channel_id] = False
+            
+            # ✅ КРИТИЧНО: Сбрасываем метрику first_audio для нового вопроса
+            if channel_id in self.performance_metrics:
+                if "first_audio_time" in self.performance_metrics[channel_id]:
+                    del self.performance_metrics[channel_id]["first_audio_time"]
             
             logger.info(f"🧹 Cleared all queues for channel {channel_id}")
             

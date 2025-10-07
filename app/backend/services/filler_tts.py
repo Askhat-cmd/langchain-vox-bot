@@ -42,14 +42,22 @@ class InstantFillerTTS:
         
         logger.info("🎵 InstantFillerTTS инициализирован")
     
-    async def initialize(self):
-        """Инициализация с предгенерацией filler words"""
+    async def initialize(self, grpc_tts=None):
+        """
+        Инициализация с предгенерацией filler words
+        
+        Args:
+            grpc_tts: Экземпляр YandexGrpcTTS для генерации реального аудио (опционально)
+        """
         try:
             logger.info("🔄 Инициализация Filler TTS...")
             
+            # Сохраняем ссылку на gRPC TTS для будущего использования
+            self.grpc_tts = grpc_tts
+            
             # Предгенерируем все filler words
             for filler in self.filler_words:
-                audio = await self._synthesize_filler_simple(filler)
+                audio = await self._synthesize_filler_grpc(filler)
                 self.cached_fillers[filler] = audio
                 logger.info(f"✅ Cached filler: '{filler}'")
             
@@ -83,10 +91,10 @@ class InstantFillerTTS:
                 logger.info(f"⚡ Instant cached filler: '{filler}' ({elapsed:.3f}s)")
                 return audio
             else:
-                # Fallback - генерируем на лету
-                audio = await self._synthesize_filler_simple(filler)
+                # Fallback - генерируем на лету через gRPC
+                audio = await self._synthesize_filler_grpc(filler)
                 elapsed = time.time() - start_time
-                logger.info(f"⚡ Generated filler: '{filler}' ({elapsed:.3f}s)")
+                logger.info(f"⚡ Generated filler on-the-fly: '{filler}' ({elapsed:.3f}s)")
                 return audio
                 
         except Exception as e:
@@ -121,24 +129,47 @@ class InstantFillerTTS:
         else:
             return "Хм,"  # Универсальный
     
-    async def _synthesize_filler_simple(self, text: str) -> bytes:
+    async def _synthesize_filler_grpc(self, text: str) -> bytes:
         """
-        Простой синтез filler word (заглушка для демонстрации)
+        Синтез filler word через gRPC TTS (РЕАЛЬНЫЙ ЗВУК!)
         
-        В реальной реализации здесь будет:
-        - SpeechT5/Kokoro для быстрого локального синтеза
-        - Или предгенерированные WAV файлы
+        Args:
+            text: Текст для синтеза (например "Хм,")
+            
+        Returns:
+            bytes: Аудио данные (WAV формат, 8kHz)
+        """
+        try:
+            # Если есть gRPC TTS - используем реальный синтез
+            if self.grpc_tts:
+                try:
+                    audio_data = await self.grpc_tts.synthesize_chunk_fast(text)
+                    logger.info(f"✅ Filler synthesized via gRPC: '{text}' ({len(audio_data)} bytes)")
+                    return audio_data
+                except Exception as grpc_error:
+                    logger.warning(f"⚠️ gRPC filler failed for '{text}', fallback to silence: {grpc_error}")
+                    return self._synthesize_filler_simple(text)
+            else:
+                # Fallback на тишину если gRPC недоступен
+                logger.debug(f"ℹ️ gRPC TTS not available, using silence for filler")
+                return self._synthesize_filler_simple(text)
+            
+        except Exception as e:
+            logger.error(f"❌ Filler synthesis error: {e}")
+            return self._synthesize_filler_simple(text)
+    
+    def _synthesize_filler_simple(self, text: str) -> bytes:
+        """
+        Fallback: Синтез filler word как тишина
+        Используется только если gRPC TTS недоступен
         
         Args:
             text: Текст для синтеза
             
         Returns:
-            bytes: Аудио данные
+            bytes: Аудио данные (WAV с тишиной)
         """
         try:
-            # ЗАГЛУШКА: Создаем простой WAV файл с тишиной
-            # В реальной реализации здесь будет настоящий TTS
-            
             # Создаем 0.5 секунды тишины (16-bit, 8kHz, mono)
             sample_rate = 8000
             duration = 0.5  # 500мс
@@ -153,7 +184,7 @@ class InstantFillerTTS:
             # Объединяем заголовок и данные
             wav_data = wav_header + audio_data
             
-            logger.debug(f"🎵 Generated simple filler audio: {len(wav_data)} bytes")
+            logger.debug(f"🎵 Generated silence filler: {len(wav_data)} bytes")
             return wav_data
             
         except Exception as e:

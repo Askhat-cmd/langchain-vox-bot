@@ -71,21 +71,26 @@ class CachedOpenAIEmbeddings(OpenAIEmbeddings):
         return results
     
     def embed_query(self, text: str) -> List[float]:
-        """Кешированное создание embedding для запроса"""
+        """
+        🚀 КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: Агрессивное кеширование query embeddings
+        Цель: Избежать OpenAI API вызовов при каждом запросе (экономия 0.7-0.9с)
+        """
         cache_key = self._get_cache_key(text)
         cached_embedding = self._cache_data['redis_client'].get(cache_key)
         
         if cached_embedding:
-            logger.debug("✅ Embedding запроса из кеша")
+            logger.info(f"⚡ ОПТИМИЗАЦИЯ: Embedding запроса из кеша (экономия ~0.8с)")
             return json.loads(cached_embedding)
         
-        # Создаем новый embedding
-        logger.debug("🔄 Создаем новый embedding для запроса")
+        # Создаем новый embedding ТОЛЬКО если его нет в кеше
+        logger.warning(f"🔄 МЕДЛЕННО: Создаем новый embedding для запроса (OpenAI API ~0.8с)")
+        start_time = time.time()
         embedding = super().embed_query(text)
+        elapsed = time.time() - start_time
         
-        # Сохраняем в кеш
+        # Сохраняем в кеш с длительным TTL
         self._cache_data['redis_client'].setex(cache_key, self._cache_data['cache_ttl'], json.dumps(embedding))
-        logger.debug("💾 Сохранен в кеш embedding запроса")
+        logger.info(f"💾 Сохранен в кеш embedding запроса (заняло {elapsed:.3f}с)")
         
         return embedding
 
@@ -121,8 +126,57 @@ class Agent:
             raise SystemExit(f"Остановка приложения: {e}")
 
         self._initialize_rag_chain()
+        
+        # 🚀 ОПТИМИЗАЦИЯ: Pre-warm кеш для популярных вопросов
+        self._prewarm_embedding_cache()
+        
         logger.info("--- Агент 'Метротест' успешно инициализирован ---")
 
+    def _prewarm_embedding_cache(self):
+        """
+        🚀 ОПТИМИЗАЦИЯ: Предзагрузка embeddings для популярных вопросов
+        Запускается при старте агента, чтобы первые звонки были быстрыми
+        """
+        if not self.cache_enabled:
+            logger.info("⚠️ Кеш отключен, pre-warming пропущен")
+            return
+        
+        # Список популярных вопросов для pre-warming
+        common_questions = [
+            "твердомер",
+            "разрывная машина",
+            "испытательный пресс",
+            "цена",
+            "характеристики",
+            "доставка",
+            "У вас есть пресс испытательный",
+            "Какие есть твердомеры",
+            "Сколько стоит разрывная машина",
+            "Какие характеристики у РЭМ",
+            "Есть ли гарантия",
+            "Как оформить заказ"
+        ]
+        
+        logger.info(f"🔥 Pre-warming кеша для {len(common_questions)} популярных вопросов...")
+        
+        # Используем embeddings напрямую для pre-warming
+        if isinstance(self.db._embedding_function, CachedOpenAIEmbeddings):
+            warmed = 0
+            for question in common_questions:
+                try:
+                    # Проверяем, есть ли уже в кеше
+                    cache_key = self.db._embedding_function._get_cache_key(question)
+                    if not self.redis_client.get(cache_key):
+                        # Создаем embedding (он автоматически сохранится в кеш)
+                        self.db._embedding_function.embed_query(question)
+                        warmed += 1
+                except Exception as e:
+                    logger.debug(f"Ошибка pre-warming для '{question}': {e}")
+            
+            logger.info(f"✅ Pre-warming завершен: {warmed} новых, {len(common_questions) - warmed} уже в кеше")
+        else:
+            logger.warning("⚠️ Embeddings не поддерживают кеширование, pre-warming пропущен")
+    
     def _get_cache_key(self, text: str, kb: str) -> str:
         """Генерирует ключ кеша для embedding запроса."""
         combined = f"{text}:{kb}:{self.last_kb}"
@@ -172,12 +226,19 @@ class Agent:
         except ValueError:
             temperature = 0.2
         logger.info(f"LLM конфигурация: {'PRIMARY' if primary else 'FALLBACK'} model='{model_name}', temperature={temperature}")
+        # ОПТИМИЗАЦИЯ: ограничиваем длину ответа и таймаут
+        try:
+            max_tokens = int(os.getenv("LLM_MAX_TOKENS", "128"))
+        except ValueError:
+            max_tokens = 128
+
         return ChatOpenAI(
-            model_name=model_name, 
-            temperature=temperature, 
+            model_name=model_name,
+            temperature=temperature,
             streaming=True,
-            request_timeout=15,  # ОПТИМИЗАЦИЯ: агрессивный timeout для запросов
-            max_retries=1        # ОПТИМИЗАЦИЯ: минимум повторов
+            request_timeout=12,  # короче для быстрого отказа
+            max_retries=1,
+            max_tokens=max_tokens
         )
 
     def load_prompts(self):
@@ -218,7 +279,8 @@ class Agent:
             logger.info("⚠️ Используем обычные embeddings (кеширование недоступно)")
             
         self.db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        kb_k = int(os.getenv("KB_TOP_K", "3"))
+        # ОПТИМИЗАЦИЯ: уменьшаем количество документов для контекста
+        kb_k = int(os.getenv("KB_TOP_K", "1"))
         self.retriever_general = self.db.as_retriever(
             search_type="similarity", search_kwargs={"k": kb_k, "filter": {"kb": "general"}}
         )

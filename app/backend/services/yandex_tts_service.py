@@ -10,6 +10,8 @@ import subprocess
 import hashlib
 import logging
 import asyncio
+import wave
+import io
 from typing import Optional
 
 # Добавляем путь к gRPC файлам
@@ -56,6 +58,29 @@ class YandexTTSService:
             self._init_grpc_connection()
         
         logger.info("🚀 Yandex TTS Service с gRPC streaming инициализирован")
+    
+    def _create_wav_from_pcm(self, pcm_data: bytes, sample_rate: int = 8000, channels: int = 1, sample_width: int = 2) -> bytes:
+        """
+        Создание WAV файла из raw PCM данных
+        
+        Args:
+            pcm_data: Raw PCM данные (LINEAR16_PCM)
+            sample_rate: Частота дискретизации (8000 для Asterisk)
+            channels: Количество каналов (1 = моно)
+            sample_width: Ширина сэмпла в байтах (2 = 16 бит)
+        
+        Returns:
+            bytes: WAV файл с заголовками
+        """
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(sample_width)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_data)
+        
+        wav_buffer.seek(0)
+        return wav_buffer.read()
     
     def _init_grpc_connection(self):
         """Инициализация gRPC соединения для максимальной скорости"""
@@ -123,12 +148,14 @@ class YandexTTSService:
             # Получаем свежий IAM токен
             iam_token = self._get_fresh_iam_token()
             
-            # Создаем запрос для gRPC streaming (ИСПРАВЛЕН ИМПОРТ!)
+            # Создаем запрос для gRPC streaming с ПРАВИЛЬНЫМ форматом для Asterisk
             request = tts_pb2.UtteranceSynthesisRequest(
                 text=text,
                 output_audio_spec=tts_pb2.AudioFormatOptions(
-                    container_audio=tts_pb2.ContainerAudio(
-                        container_audio_type=tts_pb2.ContainerAudio.ContainerAudioType.WAV
+                    # ✅ ИСПРАВЛЕНО: RawAudio с LINEAR16_PCM 8000Hz для Asterisk
+                    raw_audio=tts_pb2.RawAudio(
+                        audio_encoding=tts_pb2.RawAudio.AudioEncoding.LINEAR16_PCM,
+                        sample_rate_hertz=8000  # КРИТИЧНО: 8kHz для телефонии
                     )
                 ),
                 hints=[
@@ -148,23 +175,26 @@ class YandexTTSService:
             
             logger.info(f"🚀 gRPC TTS запрос: {text[:50]}...")
             
-            # Получаем поток аудио данных
+            # Получаем поток raw PCM данных
             response_stream = self.tts_stub.UtteranceSynthesis(request, metadata=metadata)
             
-            # Собираем аудио данные
-            audio_chunks = []
+            # Собираем raw PCM чанки
+            pcm_chunks = []
             for response in response_stream:
                 if response.audio_chunk.data:
-                    audio_chunks.append(response.audio_chunk.data)
+                    pcm_chunks.append(response.audio_chunk.data)
             
-            if not audio_chunks:
+            if not pcm_chunks:
                 logger.error("❌ Пустой ответ от gRPC TTS")
                 return None
             
-            # Объединяем все чанки
-            audio_data = b''.join(audio_chunks)
+            # Объединяем raw PCM данные
+            raw_pcm = b''.join(pcm_chunks)
             
-            # Сохраняем готовый WAV файл
+            # ✅ КРИТИЧНО: Конвертируем raw PCM в WAV для Asterisk
+            audio_data = self._create_wav_from_pcm(raw_pcm, sample_rate=8000, channels=1, sample_width=2)
+            
+            # Сохраняем готовый WAV файл 8kHz
             cache_key = hashlib.md5(text.encode()).hexdigest()
             wav_filename = f"{filename_prefix}_{cache_key}.wav"
             wav_path = os.path.join(self.asterisk_sounds_dir, wav_filename)
@@ -172,35 +202,15 @@ class YandexTTSService:
             with open(wav_path, "wb") as f:
                 f.write(audio_data)
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Конвертируем в GSM формат для Asterisk (как все существующие звуки)
-            gsm_path = wav_path.replace('.wav', '.gsm')
-            sox_cmd = [
-                "sox", "-t", "wav", wav_path, "-r", "8000", "-c", "1", "-t", "gsm", gsm_path
-            ]
+            # Устанавливаем правильные права доступа для Asterisk
+            subprocess.run(["chown", "asterisk:asterisk", wav_path], check=True, capture_output=True)
+            subprocess.run(["chmod", "644", wav_path], check=True, capture_output=True)
             
-            try:
-                subprocess.run(sox_cmd, check=True, capture_output=True)
-                # Удаляем оригинальный WAV файл
-                os.remove(wav_path)
-                
-                # ИСПРАВЛЕНО: Устанавливаем правильные права доступа для Asterisk
-                subprocess.run(["chown", "asterisk:asterisk", gsm_path], check=True)
-                subprocess.run(["chmod", "644", gsm_path], check=True)
-                logger.info(f"✅ Права доступа установлены: asterisk:asterisk 644")
-                
-                logger.info(f"⚡ gRPC TTS готов за рекордное время (GSM): {os.path.basename(gsm_path)}")
-                # Возвращаем путь к GSM файлу
-                wav_path = gsm_path
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"⚠️ Не удалось конвертировать в GSM: {e}")
-                # Оставляем оригинальный WAV файл как fallback
-                subprocess.run(["chown", "asterisk:asterisk", wav_path], check=True)
-                logger.info(f"⚡ gRPC TTS готов (WAV fallback): {wav_filename}")
+            logger.info(f"⚡ gRPC TTS готов (8kHz WAV): {wav_filename}, размер={len(audio_data)} bytes")
             
-                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отключаем кеширование для диагностики
-                # Кешируем короткие фразы
-                if False:  # Отключаем кеширование
-                    self.tts_cache[hashlib.md5(text.encode()).hexdigest()] = wav_path
+            # Кеширование отключено для диагностики
+            # if len(text) < 100:
+            #     self.tts_cache[hashlib.md5(text.encode()).hexdigest()] = wav_path
             
             return wav_path
             

@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Улучшенный Barge-in Manager для chunked системы
 Цель: корректная обработка прерываний в сложной параллельной архитектуре
 """
 
 import asyncio
+import os
 import time
 import logging
 from typing import Dict, List, Optional, Set
@@ -28,8 +29,8 @@ class BargeInManager:
         self.barge_in_states: Dict[str, Dict] = defaultdict(dict)
         
         # Константы для защиты от ложных срабатываний
-        self.BARGE_IN_GUARD_MS = 1500  # Защита от ложного barge-in (мс)
-        self.DEBOUNCE_MS = 200  # Дебаунс для множественных событий
+        self.BARGE_IN_GUARD_MS = int(os.getenv("BARGE_IN_GUARD_MS", "400"))  # Защита от ложного barge-in (мс)
+        self.DEBOUNCE_MS = int(os.getenv("BARGE_IN_DEBOUNCE_MS", "200"))  # Дебаунс для множественных событий
         
         # Таймеры для дебаунса
         self.debounce_timers: Dict[str, asyncio.Task] = {}
@@ -305,4 +306,6 @@ barge_in_manager = BargeInManager()
 def get_barge_in_manager() -> BargeInManager:
     """Возвращает глобальный экземпляр BargeInManager"""
     return barge_in_manager
+
+
 

@@ -1,4 +1,4 @@
-
+﻿
 #!/usr/bin/env python3
 """
 Оптимизированный StasisHandler с интеграцией всех компонентов оптимизации
@@ -29,7 +29,7 @@ from app.backend.services.asr_service import get_asr_service
 from app.backend.utils.text_normalizer import normalize as normalize_text
 from app.backend.services.log_storage import insert_log
 
-# НОВЫЕ КОМПОНЕНТЫ ОПТИМИЗАЦИИ
+# НОВЫЕ КОМПОНЕНТЫ ОПТМЗАЦ
 from app.backend.services.yandex_grpc_tts import YandexGrpcTTS
 from app.backend.services.tts_adapter import TTSAdapter
 from app.backend.services.filler_tts import InstantFillerTTS
@@ -55,7 +55,7 @@ class OptimizedAsteriskAIHandler:
     def __init__(self):
         self.ws_url = "ws://localhost:8088/ari/events?app=asterisk-bot&api_key=asterisk:asterisk123"
         
-        # Инициализируем AI Agent
+        # нициализируем AI Agent
         try:
             self.agent = Agent()
             logger.info("✅ AI Agent успешно инициализирован")
@@ -63,7 +63,7 @@ class OptimizedAsteriskAIHandler:
             logger.error(f"❌ Ошибка инициализации AI Agent: {e}")
             self.agent = None
         
-        # Инициализируем ASR сервис
+        # нициализируем ASR сервис
         try:
             self.asr = get_asr_service()
             logger.info("✅ ASR сервис инициализирован")
@@ -71,30 +71,34 @@ class OptimizedAsteriskAIHandler:
             logger.error(f"❌ Ошибка инициализации ASR: {e}")
             self.asr = None
         
-        # НОВЫЕ КОМПОНЕНТЫ ОПТИМИЗАЦИИ
+        # НОВЫЕ КОМПОНЕНТЫ ОПТМЗАЦ
         self.grpc_tts = None
         self.tts_adapter = None
         self.filler_tts = None
         self.parallel_tts = None
         # Удален adaptive_recording - возвращаемся к простой логике
         
-        # НОВЫЕ КОМПОНЕНТЫ УМНОЙ ДЕТЕКЦИИ РЕЧИ
+        # НОВЫЕ КОМПОНЕНТЫ УМНОЙ ДЕТЕКЦ РЕЧ
         self.speech_detector = None
         self.speech_filter = None
         self.smart_detection_enabled = os.getenv("SPEECH_DETECTION_ENABLED", "false").lower() == "true"
         self.speech_debug_logging = os.getenv("SPEECH_DEBUG_LOGGING", "false").lower() == "true"
         
-        # VAD СЕРВИС ДЛЯ УМЕНЬШЕНИЯ ПАУЗЫ
+        # ✅ ОТСЛЕЖИВАНИЕ PLAYBACK СОБЫТИЙ (для filler оптимизации)
+        self.playback_events = {}
+        
+        # VAD СЕРВС ДЛЯ УМЕНЬШЕНЯ ПАУЗЫ
         self.vad_service = None
         self.vad_enabled = os.getenv("VAD_ENABLED", "false").lower() == "true"
         
         # Активные звонки с оптимизированными данными
         self.active_calls = {}
-        
+        self.bridge_to_channel = {}
+
         # Константы оптимизации
         self.SPEECH_END_TIMEOUT = 0.2
-        self.BARGE_IN_GUARD_MS = 1500  # Увеличено для Asterisk
-        self.INPUT_DEBOUNCE_MS = 1200
+        self.BARGE_IN_GUARD_MS = int(os.getenv("BARGE_IN_GUARD_MS", "400"))  # Увеличено для Asterisk
+        self.INPUT_DEBOUNCE_MS = int(os.getenv("INPUT_DEBOUNCE_MS", "1200"))
         
         # Конфигурация умной детекции речи
         self.silence_timeout = float(os.getenv("SPEECH_SILENCE_TIMEOUT", "1.2"))
@@ -110,9 +114,9 @@ class OptimizedAsteriskAIHandler:
         logger.info("🚀 OptimizedAsteriskAIHandler инициализирован")
     
     async def initialize_optimization_services(self):
-        """Инициализация всех сервисов оптимизации"""
+        """нициализация всех сервисов оптимизации"""
         try:
-            logger.info("🔄 Инициализация сервисов оптимизации...")
+            logger.info("🔄 нициализация сервисов оптимизации...")
             
             # 1. Yandex gRPC TTS
             self.grpc_tts = YandexGrpcTTS()
@@ -122,13 +126,14 @@ class OptimizedAsteriskAIHandler:
             self.tts_adapter = TTSAdapter()
             await self.tts_adapter.initialize()
             
-            # 3. Filler TTS
+            # 3. Filler TTS (с передачей gRPC TTS для реального синтеза)
             self.filler_tts = InstantFillerTTS()
-            await self.filler_tts.initialize()
+            await self.filler_tts.initialize(grpc_tts=self.grpc_tts)
             
             # 4. Parallel TTS Processor
             ari_client = AsteriskARIClient()
-            self.parallel_tts = ParallelTTSProcessor(self.tts_adapter, ari_client)
+            # ✅ ИСПРАВЛЕНО: Используем уже инициализированный self.grpc_tts
+            self.parallel_tts = ParallelTTSProcessor(self.grpc_tts, ari_client)
             
             # 5. Умная детекция речи
             if self.smart_detection_enabled:
@@ -154,7 +159,37 @@ class OptimizedAsteriskAIHandler:
             logger.error(f"❌ Ошибка инициализации сервисов оптимизации: {e}")
             # Fallback на старые сервисы
             self.tts = get_yandex_tts_service()
-            logger.warning("⚠️ Используем fallback TTS сервис")
+            logger.warning("⚠️ спользуем fallback TTS сервис")
+    
+    async def cleanup_hanging_channels(self):
+        """Принудительно завершает все висящие каналы при запуске бота"""
+        try:
+            logger.info("🧹 Очистка висящих каналов...")
+            
+            async with AsteriskARIClient() as ari:
+                # Получаем список всех активных каналов
+                channels = await ari.get_channels()
+                
+                if not channels:
+                    logger.info("✅ Висящих каналов не найдено")
+                    return
+                
+                logger.info(f"🔍 Найдено {len(channels)} активных каналов")
+                
+                # Завершаем каждый канал
+                for channel in channels:
+                    channel_id = channel.get('id')
+                    if channel_id:
+                        try:
+                            await ari.hangup_channel(channel_id)
+                            logger.info(f"🔚 Канал {channel_id} принудительно завершен")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Не удалось завершить канал {channel_id}: {e}")
+                
+                logger.info("✅ Очистка висящих каналов завершена")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка очистки висящих каналов: {e}")
     
     async def handle_stasis_start(self, event):
         """Обрабатывает начало звонка с оптимизированной инициализацией"""
@@ -197,7 +232,7 @@ class OptimizedAsteriskAIHandler:
         async with AsteriskARIClient() as ari:
             logger.info(f"✅ Звонок уже принят в dialplan: {channel_id}")
             
-            # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принудительно отвечаем на канал для ARI playback
+            # 🎯 КРТЧЕСКОЕ СПРАВЛЕНЕ: Принудительно отвечаем на канал для ARI playback
             try:
                 await ari.answer_channel(channel_id)
                 logger.info(f"✅ Канал {channel_id} отвечен для ARI playback")
@@ -233,7 +268,7 @@ class OptimizedAsteriskAIHandler:
 
     async def process_user_speech_optimized(self, channel_id: str, audio_path: str):
         """
-        ОПТИМИЗИРОВАННАЯ обработка речи пользователя
+        ОПТМЗРОВАННАЯ обработка речи пользователя
         ЦЕЛЬ: 1.1 секунды от ASR до первого звука
         """
         if channel_id not in self.active_calls:
@@ -263,7 +298,7 @@ class OptimizedAsteriskAIHandler:
         call_data["processing_speech"] = True
 
         try:
-            logger.info(f"🎯 ОПТИМИЗИРОВАННАЯ обработка речи для канала {channel_id}")
+            logger.info("🎯 Оптимизированная обработка речи активирована")
             
             # ЭТАП 1.2: Проверка размера аудио файла перед ASR
             if not os.path.exists(audio_path):
@@ -292,13 +327,13 @@ class OptimizedAsteriskAIHandler:
                 if self.vad_enabled and self.vad_service:
                     await self.vad_service.update_activity(channel_id)
 
-                # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем на пустой результат ASR
+                # 🎯 КРТЧЕСКОЕ СПРАВЛЕНЕ: Проверяем на пустой результат ASR
                 if not normalized_text or not normalized_text.strip():
                     logger.warning(f"⚠️ ASR вернул пустой результат, пропускаем обработку")
                     # Не завершаем звонок при пустом ASR - возможно пользователь еще говорит
                     return
 
-                # 🧠 УМНАЯ ФИЛЬТРАЦИЯ: Проверяем информативность речи
+                # 🧠 УМНАЯ ФЛЬТРАЦЯ: Проверяем информативность речи
                 if self.smart_detection_enabled and self.speech_filter:
                     if self.speech_debug_logging:
                         analysis = self.speech_filter.get_detailed_analysis(normalized_text)
@@ -333,36 +368,42 @@ class OptimizedAsteriskAIHandler:
                 })
             else:
                 logger.warning("ASR сервис недоступен")
-                normalized_text = "Извините, система распознавания речи недоступна"
+                normalized_text = "звините, система распознавания речи недоступна"
 
             # 2. Останавливаем TTS при barge-in
             await self.stop_tts_on_barge_in_optimized(channel_id, "UserSpeech")
 
-            # 3. ОПТИМИЗИРОВАННАЯ AI обработка с chunking
+            # 3. ОПТМЗРОВАННАЯ AI обработка с chunking
             if self.agent and normalized_text:
-                logger.info(f"🤖 Запрашиваем ОПТИМИЗИРОВАННЫЙ ответ от AI агента")
+                logger.info(f"🤖 Запрашиваем ОПТМЗРОВАННЫЙ ответ от AI агента")
                 
                 try:
-                    # Запускаем filler word НЕМЕДЛЕННО
+                    # ✅ ОПТИМИЗАЦИЯ: Запускаем filler word НЕМЕДЛЕННО!
                     filler_task = asyncio.create_task(
                         self._play_instant_filler(channel_id, normalized_text)
                     )
                     
-                    # ВРЕМЕННО: Используем оригинальный метод для тестирования
-                    # TODO: Вернуться к chunked generator после исправления
-                    logger.info("🔄 ВРЕМЕННО: Используем оригинальный AI response для тестирования")
+                    # ✅ КРИТИЧНО: Даём filler ДОСТАТОЧНО времени начать воспроизведение (200мс)
+                    # Это оптимальный баланс: достаточно для старта, но не слишком долго
+                    await asyncio.sleep(0.20)
                     
-                    # Получаем обычный response generator от AI Agent
+                    # ✅ CHUNKED STREAMING ACTIVATED! (Психологический эффект)
+                    logger.info("🚀 ОПТИМИЗАЦИЯ: Используем chunked streaming с разделителями |")
+                    
+                    # Получаем обычный response generator от AI Agent (с разделителями |)
+                    # Теперь это запускается ПАРАЛЛЕЛЬНО с filler (который уже играется!)
                     response_generator = self.agent.get_response_generator(normalized_text, session_id)
                     
-                    # Обрабатываем AI ответы через оригинальный метод
-                    await self.process_ai_response_streaming(channel_id, response_generator)
+                    # Обрабатываем AI ответы через streaming с chunked TTS
+                    await self.process_ai_response_streaming_with_chunked_tts(channel_id, response_generator)
                     
-                    # Ждем завершения filler
-                    await filler_task
+                    # НЕ ждем завершения filler - он уже сыгран параллельно!
+                    # (Но на всякий случай проверяем что не осталось висеть)
+                    if not filler_task.done():
+                        await filler_task
                     
                     total_time = time.time() - overall_start
-                    logger.info(f"✅ ОПТИМИЗИРОВАННАЯ обработка завершена: {total_time:.2f}s")
+                    logger.info(f"✅ ОПТМЗРОВАННАЯ обработка завершена: {total_time:.2f}s")
                     
                     # Логируем метрики
                     self._log_performance_metrics(channel_id, total_time)
@@ -397,7 +438,7 @@ class OptimizedAsteriskAIHandler:
                     await self._fallback_to_old_system(channel_id, normalized_text)
             else:
                 logger.warning("AI Agent недоступен или текст пустой")
-                await self.speak_optimized(channel_id, "Извините, система ИИ временно недоступна")
+                await self.speak_optimized(channel_id, "звините, система  временно недоступна")
 
         except Exception as e:
             logger.error(f"❌ Ошибка оптимизированной обработки речи: {e}", exc_info=True)
@@ -406,11 +447,11 @@ class OptimizedAsteriskAIHandler:
             if channel_id in self.active_calls:
                 self.active_calls[channel_id]["processing_speech"] = False
 
-    async def _play_instant_filler(self, channel_id: str, user_text: str):
-        """Воспроизводит мгновенный filler word"""
+    async def _play_instant_filler(self, channel_id: str, user_text: str) -> Optional[str]:
+        """Воспроизводит мгновенный filler word и возвращает playback_id"""
         try:
             if not self.filler_tts:
-                return
+                return None
                 
             filler_start = time.time()
             
@@ -419,7 +460,7 @@ class OptimizedAsteriskAIHandler:
             
             if filler_audio:
                 # Воспроизводим немедленно
-                await self._play_audio_data(channel_id, filler_audio)
+                playback_id = await self._play_audio_data(channel_id, filler_audio)
                 
                 filler_time = time.time() - filler_start
                 logger.info(f"⚡ Filler played: {filler_time:.2f}s")
@@ -427,9 +468,41 @@ class OptimizedAsteriskAIHandler:
                 # Логируем метрику
                 call_data = self.active_calls.get(channel_id, {})
                 call_data["filler_time"] = filler_time
+                
+                return playback_id
+            
+            return None
             
         except Exception as e:
             logger.error(f"❌ Filler playback error: {e}")
+            return None
+    
+    async def _wait_for_playback_start(self, playback_id: str, timeout: float = 0.5) -> bool:
+        """
+        ✅ ГИБРИДНАЯ ОПТИМИЗАЦИЯ: Ждёт пока playback реально начнётся (событие PlaybackStarted от ARI)
+        
+        Args:
+            playback_id: ID воспроизведения от ARI
+            timeout: Максимальное время ожидания в секундах (по умолчанию 500мс)
+        
+        Returns:
+            True если playback начался, False если таймаут
+        """
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            # Проверяем зарегистрировано ли событие PlaybackStarted
+            if playback_id in self.playback_events:
+                if self.playback_events[playback_id].get('started'):
+                    elapsed = time.time() - start_time
+                    logger.info(f"✅ Playback {playback_id[:8]}... начался через {elapsed*1000:.0f}мс")
+                    return True
+            
+            # Проверяем каждые 10мс
+            await asyncio.sleep(0.01)
+        
+        logger.warning(f"⏰ Playback {playback_id[:8]}... не начался за {timeout*1000:.0f}мс")
+        return False
 
     async def process_chunked_ai_response(self, channel_id: str, chunked_generator):
         """Обрабатывает chunked AI ответы через Parallel TTS Processor"""
@@ -438,8 +511,8 @@ class OptimizedAsteriskAIHandler:
                 logger.warning("Parallel TTS Processor недоступен")
                 return
             
-            # Итерируем chunked generator
-            async for chunk_data in chunked_generator:
+            # ✅ ИСПРАВЛЕНО: Итерируем sync generator с await для каждого чанка
+            for chunk_data in chunked_generator:
                 # Запускаем TTS каждого чанка НЕМЕДЛЕННО (параллельно)
                 await self.parallel_tts.process_chunk_immediate(channel_id, chunk_data)
                 
@@ -450,13 +523,13 @@ class OptimizedAsteriskAIHandler:
                     self.active_calls[channel_id]["first_chunk_time"] = first_chunk_time
                     
         except Exception as e:
-            logger.error(f"❌ Chunked AI response error: {e}")
+            logger.error(f"❌ Chunked AI response error: {e}", exc_info=True)
 
-    async def process_ai_response_streaming(self, channel_id: str, response_generator):
-        """Потоковая обработка ответа AI с разделителями | (из оригинальной версии)."""
+    async def process_ai_response_streaming_with_chunked_tts(self, channel_id: str, response_generator):
+        """✅ ОПТИМИЗИРОВАННАЯ потоковая обработка с chunked TTS + parallel processing"""
         import time
         stasis_start = time.time()
-        logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ STASIS: Начинаем обработку AI response для канала {channel_id}")
+        logger.info(f"🚀 CHUNKED TTS: Начинаем обработку AI response для канала {channel_id}")
         
         if channel_id not in self.active_calls:
             return
@@ -470,11 +543,136 @@ class OptimizedAsteriskAIHandler:
         # Накапливаем chunks от AI Agent
         first_chunk = True
         chunk_count = 0
+        sentence_count = 0
+        
+        # ✅ КРИТИЧЕСКАЯ КОНСТАНТА: Максимальный размер чанка для принудительной сегментации
+        MAX_CHUNK_SIZE = 75  # символов (оптимизировано: 75 симв = 3-5с аудио вместо 6-10с)
+        
+        for chunk in response_generator:
+            # ✅ КРИТИЧНО: Даём квант времени event loop!
+            # Это позволяет filler task выполниться НЕМЕДЛЕННО
+            await asyncio.sleep(0)
+            
+            if first_chunk:
+                first_chunk_time = time.time() - stasis_start
+                logger.info(f"⚡ CHUNKED TTS: Первый токен получен через {first_chunk_time:.3f}с")
+                first_chunk = False
+            
+            if chunk:
+                chunk_count += 1
+                call_data["response_buffer"] += chunk
+                call_data["bot_response"] += chunk
+                
+                # ✅ ПРИОРИТЕТ 1: Проигрываем завершённые предложения по разделителю |
+                while "|" in call_data["response_buffer"]:
+                    idx = call_data["response_buffer"].index("|")
+                    sentence = self.clean_text(call_data["response_buffer"][:idx])
+                    call_data["response_buffer"] = call_data["response_buffer"][idx + 1:]
+                    
+                    if sentence and self.parallel_tts:
+                        sentence_count += 1
+                        chunk_data = {
+                            "text": sentence,
+                            "chunk_number": sentence_count,
+                            "is_first": sentence_count == 1
+                        }
+                        await self.parallel_tts.process_chunk_immediate(channel_id, chunk_data)
+                        logger.info(f"🔊 DELIMITER CHUNK {sentence_count}: '{sentence[:30]}...'")
+                
+                # ✅ ПРИОРИТЕТ 2: Принудительная сегментация при достижении MAX_CHUNK_SIZE
+                # Ищем естественную точку разбиения (знак препинания)
+                if len(call_data["response_buffer"]) >= MAX_CHUNK_SIZE:
+                    best_split = -1
+                    best_delim = None
+                    
+                    # Ищем ближайший знак препинания в диапазоне 45-95 символов (75±20)
+                    for delim in ['. ', '! ', '? ', ', ', '; ']:
+                        idx = call_data["response_buffer"].find(delim, 45, MAX_CHUNK_SIZE + 20)
+                        if idx > 0:
+                            best_split = idx + len(delim)
+                            best_delim = delim
+                            break
+                    
+                    # Если не нашли знак препинания - режем по MAX_CHUNK_SIZE
+                    if best_split <= 0 and len(call_data["response_buffer"]) > MAX_CHUNK_SIZE + 25:
+                        best_split = MAX_CHUNK_SIZE
+                        logger.debug(f"⚠️ Forced hard split at {best_split} (no punctuation found)")
+                    
+                    if best_split > 0:
+                        sentence = self.clean_text(call_data["response_buffer"][:best_split])
+                        call_data["response_buffer"] = call_data["response_buffer"][best_split:]
+                        
+                        if sentence and self.parallel_tts:
+                            sentence_count += 1
+                            chunk_data = {
+                                "text": sentence,
+                                "chunk_number": sentence_count,
+                                "is_first": sentence_count == 1
+                            }
+                            await self.parallel_tts.process_chunk_immediate(channel_id, chunk_data)
+                            logger.info(f"🔊 FORCED CHUNK {sentence_count} ({len(sentence)} chars): '{sentence[:30]}...'")
+                
+                # Сбрасываем таймер для остатка
+                if call_data["buffer_timer"]:
+                    call_data["buffer_timer"].cancel()
+                
+                # Страховочный таймер для "хвоста" без |
+                if call_data["response_buffer"].strip():
+                    call_data["buffer_timer"] = asyncio.create_task(
+                        self.flush_response_buffer_chunked(channel_id)
+                    )
+        
+        total_stasis_time = time.time() - stasis_start
+        logger.info(f"✅ CHUNKED TTS: Обработка AI response заняла {total_stasis_time:.3f}с, токенов: {chunk_count}, предложений: {sentence_count}")
+    
+    async def flush_response_buffer_chunked(self, channel_id: str):
+        """Страховочный таймер для остатка без | с chunked TTS"""
+        await asyncio.sleep(self.SPEECH_END_TIMEOUT)
+        
+        if channel_id not in self.active_calls:
+            return
+        
+        call_data = self.active_calls[channel_id]
+        
+        if call_data["response_buffer"].strip():
+            tail = self.clean_text(call_data["response_buffer"])
+            call_data["response_buffer"] = ""
+            call_data["buffer_timer"] = None
+            
+            if tail and self.parallel_tts:
+                # Отправляем финальный чанк
+                chunk_data = {
+                    "text": tail,
+                    "chunk_number": 999,  # Финальный
+                    "is_first": False,
+                    "is_final": True
+                }
+                await self.parallel_tts.process_chunk_immediate(channel_id, chunk_data)
+                logger.info(f"🏁 CHUNKED TTS: Отправлен финальный чанк: '{tail[:30]}...'")
+
+    async def process_ai_response_streaming(self, channel_id: str, response_generator):
+        """Потоковая обработка ответа AI с разделителями | (СТАРАЯ ВЕРСИЯ - FALLBACK)."""
+        import time
+        stasis_start = time.time()
+        logger.info(f"⏱️ ПРОФЛРОВАНЕ STASIS: Начинаем обработку AI response для канала {channel_id}")
+        
+        if channel_id not in self.active_calls:
+            return
+        
+        call_data = self.active_calls[channel_id]
+        
+        # нициализируем накопление ответа бота
+        if "bot_response" not in call_data:
+            call_data["bot_response"] = ""
+        
+        # Накапливаем chunks от AI Agent
+        first_chunk = True
+        chunk_count = 0
         
         for chunk in response_generator:
             if first_chunk:
                 first_chunk_time = time.time() - stasis_start
-                logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ STASIS: Первый чанк получен через {first_chunk_time:.3f}с")
+                logger.info(f"⏱️ ПРОФЛРОВАНЕ STASIS: Первый чанк получен через {first_chunk_time:.3f}с")
                 first_chunk = False
             
             if chunk:
@@ -502,7 +700,7 @@ class OptimizedAsteriskAIHandler:
                     )
         
         total_stasis_time = time.time() - stasis_start
-        logger.info(f"⏱️ ПРОФИЛИРОВАНИЕ STASIS: Обработка AI response заняла {total_stasis_time:.3f}с, чанков: {chunk_count}")
+        logger.info(f"⏱️ ПРОФЛРОВАНЕ STASIS: Обработка AI response заняла {total_stasis_time:.3f}с, чанков: {chunk_count}")
     
     async def flush_response_buffer(self, channel_id: str):
         """Страховочный таймер для остатка без | (из оригинальной версии)."""
@@ -533,30 +731,34 @@ class OptimizedAsteriskAIHandler:
         return text
 
     async def speak_optimized(self, channel_id: str, text: str):
-        """Оптимизированное воспроизведение через TTS Adapter"""
+        """Оптимизированное воспроизведение через исправленный gRPC TTS"""
         try:
             if not self.tts_adapter:
                 # Fallback на старый метод
                 await self.speak_queued(channel_id, text)
                 return
             
-            # ВРЕМЕННО: Используем оригинальный TTS для тестирования
-            # TODO: Вернуться к TTS Adapter после исправления формата
-            logger.info("🔄 ВРЕМЕННО: Используем оригинальный TTS для тестирования")
+            # ✅ ИСПРАВЛЕНО: Используем gRPC TTS с правильным форматом 8kHz
+            logger.info("🚀 Используем исправленный gRPC TTS (8kHz)")
             
-            # Используем оригинальный TTS сервис
+            # Используем исправленный TTS сервис с gRPC
             from app.backend.services.yandex_tts_service import get_yandex_tts_service
-            original_tts = get_yandex_tts_service()
+            tts_service = get_yandex_tts_service()
             
-            # Создаем файл через оригинальный TTS
+            # ✅ КРИТИЧНО: Используем gRPC метод напрямую!
             timestamp = datetime.now().strftime('%H%M%S%f')[:-3]
             audio_filename = f"stream_{channel_id}_{timestamp}"
-            sound_filename = await original_tts.text_to_speech(text, audio_filename)
+            sound_filename = await tts_service.text_to_speech_grpc(text, audio_filename)
             
             if sound_filename:
-                # Воспроизводим через ARI (как в оригинале)
+                # ✅ КРИТИЧНО: Извлекаем только имя файла без пути и расширения для ARI
+                import os
+                basename = os.path.basename(sound_filename)  # stream_xxx.wav
+                sound_name = os.path.splitext(basename)[0]   # stream_xxx (без .wav)
+                
+                # Воспроизводим через ARI с правильным форматом
                 async with AsteriskARIClient() as ari:
-                    playback_id = await ari.play_sound(channel_id, sound_filename, lang=None)
+                    playback_id = await ari.play_sound(channel_id, sound_name, lang="ru")
                     
                     if playback_id:
                         # Обновляем данные канала
@@ -565,6 +767,14 @@ class OptimizedAsteriskAIHandler:
                             call_data["current_playback"] = playback_id
                             call_data["is_speaking"] = True
                             call_data["last_speak_started_at"] = int(time.time() * 1000)
+
+                        if call_data.get("first_audio_time") is None:
+                            asr_finished_at = call_data.get("asr_complete_time")
+                            if asr_finished_at:
+                                delay = time.time() - asr_finished_at
+                                call_data["first_audio_time"] = delay
+                                logger.info(f"🔊 FIRST AUDIO PLAYED: {delay:.3f}s after ASR")
+
                         
                         logger.info(f"✅ Аудио воспроизводится через ARI: {playback_id}")
                     else:
@@ -577,17 +787,17 @@ class OptimizedAsteriskAIHandler:
             # Fallback на старый метод
             await self.speak_queued(channel_id, text)
 
-    async def _play_audio_data(self, channel_id: str, audio_data: bytes):
-        """ПРАВИЛЬНАЯ обработка аудио данных от Yandex gRPC TTS"""
+    async def _play_audio_data(self, channel_id: str, audio_data: bytes) -> Optional[str]:
+        """ПРАВЛЬНАЯ обработка аудио данных от Yandex gRPC TTS, возвращает playback_id"""
         try:
             # Проверяем, что канал еще активен
             if channel_id not in self.active_calls:
                 logger.warning(f"⚠️ Канал {channel_id} завершен, пропускаем воспроизведение")
-                return
+                return None
                 
             if not audio_data:
                 logger.warning("⚠️ Пустые аудио данные")
-                return
+                return None
             
             # Сохраняем аудио данные во временный файл
             timestamp = datetime.now().strftime('%H%M%S%f')[:-3]  # миллисекунды
@@ -597,7 +807,7 @@ class OptimizedAsteriskAIHandler:
             # Создаем директорию если не существует
             os.makedirs(os.path.dirname(temp_path), exist_ok=True)
             
-            # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем формат данных
+            # 🎯 КРТЧЕСКОЕ СПРАВЛЕНЕ: Проверяем формат данных
             header = audio_data[:12]
             
             if header.startswith(b'RIFF') and b'WAVE' in header:
@@ -623,28 +833,42 @@ class OptimizedAsteriskAIHandler:
                         call_data["current_playback"] = playback_id
                         call_data["is_speaking"] = True
                         call_data["last_speak_started_at"] = int(time.time() * 1000)
+
+                        if call_data.get("first_audio_time") is None:
+                            asr_finished_at = call_data.get("asr_complete_time")
+                            if asr_finished_at:
+                                delay = time.time() - asr_finished_at
+                                call_data["first_audio_time"] = delay
+                                logger.info(f"🔊 FIRST AUDIO PLAYED (dialplan): {delay:.3f}s after ASR")
+
                     
                     logger.info(f"✅ Аудио воспроизводится через ARI: {playback_id}")
+                    return playback_id  # ✅ Возвращаем playback_id для отслеживания
                 else:
                     logger.warning("⚠️ ARI playback не удался, пробуем fallback через dialplan")
-                    # FALLBACK: Используем dialplan Playback (как в оригинале)
+                    # FALLBACK: спользуем dialplan Playback (как в оригинале)
                     fallback_success = await self.playback_via_dialplan(channel_id, temp_filename[:-4])
                     if fallback_success:
                         logger.info("✅ Аудио воспроизводится через dialplan fallback")
                         if channel_id in self.active_calls:
                             call_data = self.active_calls[channel_id]
-                            call_data["current_playback"] = f"dialplan_{temp_filename[:-4]}"
+                            fallback_id = f"dialplan_{temp_filename[:-4]}"
+                            call_data["current_playback"] = fallback_id
                             call_data["is_speaking"] = True
                             call_data["last_speak_started_at"] = int(time.time() * 1000)
+                        return fallback_id  # ✅ Возвращаем fallback ID
                     else:
                         logger.error("❌ Не удалось воспроизвести аудио ни через ARI, ни через dialplan")
+                        return None
             
             # Очищаем временный файл после небольшой задержки
             # (даем время ARI прочитать файл)
             asyncio.create_task(self._cleanup_temp_file(temp_path, delay=5.0))
+            return None  # На случай если что-то пошло не так
             
         except Exception as e:
             logger.error(f"❌ Audio playback error: {e}")
+            return None
     
     async def _convert_lpcm_to_wav(self, lpcm_data: bytes, output_path: str):
         """Конвертирует raw LPCM в WAV файл с правильными заголовками для Asterisk"""
@@ -709,13 +933,13 @@ class OptimizedAsteriskAIHandler:
             return False
 
     async def stop_tts_on_barge_in_optimized(self, channel_id: str, event_name: str):
-        """ОПТИМИЗИРОВАННЫЙ barge-in с очисткой всех очередей"""
+        """ОПТМЗРОВАННЫЙ barge-in с очисткой всех очередей"""
         call_data = self.active_calls.get(channel_id)
         if not call_data:
             return
         
         # Защита от ложного barge-in
-        BARGE_IN_GUARD_MS = 1500
+        BARGE_IN_GUARD_MS = self.BARGE_IN_GUARD_MS
         since_start = int(time.time() * 1000) - call_data.get("last_speak_started_at", 0)
         
         if since_start < BARGE_IN_GUARD_MS:
@@ -732,7 +956,7 @@ class OptimizedAsteriskAIHandler:
             except:
                 pass
         
-        # КРИТИЧНО: Очищаем все очереди параллельного TTS
+        # КРТЧНО: Очищаем все очереди параллельного TTS
         if self.parallel_tts:
             await self.parallel_tts.clear_all_queues(channel_id)
         
@@ -747,12 +971,12 @@ class OptimizedAsteriskAIHandler:
         try:
             logger.warning("🔄 Falling back to old system")
             
-            # Используем старый метод обработки
+            # спользуем старый метод обработки
             if self.agent:
                 response_generator = self.agent.get_response_generator(user_text, self.active_calls[channel_id]["session_id"])
                 await self.process_ai_response_streaming_old(channel_id, response_generator)
             else:
-                error_text = "Извините, произошла ошибка в системе"
+                error_text = "звините, произошла ошибка в системе"
                 # Накопляем ответ бота
                 if channel_id in self.active_calls:
                     self.active_calls[channel_id]["bot_response"] = error_text
@@ -941,7 +1165,7 @@ class OptimizedAsteriskAIHandler:
     # (handle_channel_destroyed, clean_text, и т.д.)
     
     async def handle_channel_destroyed(self, event):
-        """Обрабатывает завершение звонка (как в старом проекте)"""
+        """Обрабатывает завершение звонка с принудительным завершением"""
         channel_id = event.get('channel', {}).get('id')
         
         if channel_id in self.active_calls:
@@ -950,6 +1174,14 @@ class OptimizedAsteriskAIHandler:
             end_time = datetime.now(timezone.utc)
             
             logger.info(f"📞 Звонок завершен: {channel_id}")
+            
+            # Принудительно завершаем канал если он еще существует
+            try:
+                async with AsteriskARIClient() as ari:
+                    await ari.hangup_channel(channel_id)
+                    logger.info(f"🔚 Канал {channel_id} принудительно завершен")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось принудительно завершить канал {channel_id}: {e}")
             
             # Сохраняем лог звонка (как в старом проекте)
             try:
@@ -1030,49 +1262,128 @@ class OptimizedAsteriskAIHandler:
             await self.handle_user_event(event)
         # Добавляем обработку других событий по необходимости
     
+    async def _run_asterisk_cli(self, command: str, context: str = ""):
+        """Выполняет команду `asterisk -rx` и пишет вывод в логи."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "asterisk",
+                "-rx",
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            label = context or command
+            if stdout:
+                stdout_text = stdout.decode("utf-8", errors="ignore").strip()
+                if stdout_text:
+                    logger.debug("🛠️ Asterisk CLI [%s] stdout: %s", label, stdout_text)
+            if stderr:
+                stderr_text = stderr.decode("utf-8", errors="ignore").strip()
+                if stderr_text:
+                    logger.warning("⚠️ Asterisk CLI [%s] stderr: %s", label, stderr_text)
+        except FileNotFoundError:
+            logger.debug("Asterisk CLI недоступен: бинарь asterisk не найден")
+        except Exception as cli_error:
+            logger.warning("⚠️ Ошибка запуска Asterisk CLI '%s': %s", command, cli_error)
     async def handle_playback_started(self, event):
-        """Обрабатывает начало воспроизведения"""
+        """Handle ARI playback_started event."""
         playback = event.get('playback', {})
         playback_id = playback.get('id')
         target_uri = playback.get('target_uri', '')
-        
+
+        channel_id = None
+        bridge_id = None
         if target_uri.startswith('channel:'):
             channel_id = target_uri.replace('channel:', '')
-            if channel_id in self.active_calls:
-                call_data = self.active_calls[channel_id]
-                call_data["current_playback"] = playback_id
-                call_data["is_speaking"] = True
-                call_data["last_speak_started_at"] = int(time.time() * 1000)
-                logger.info(f"🔊 Начало воспроизведения для {channel_id}: {playback_id}")
-                
-                # Отключаем VAD мониторинг во время воспроизведения
-                if self.vad_enabled and self.vad_service:
-                    await self.vad_service.stop_monitoring(channel_id)
-                    logger.info(f"🎯 VAD мониторинг отключен для {channel_id} (начало воспроизведения)")
-    
+        elif target_uri.startswith('bridge:'):
+            bridge_id = target_uri.replace('bridge:', '')
+            channel_id = self.bridge_to_channel.get(bridge_id)
+
+        if not channel_id:
+            logger.debug("PlaybackStarted for unknown target %s", target_uri)
+            return
+
+        call_data = self.active_calls.get(channel_id)
+        if not call_data:
+            logger.debug("PlaybackStarted for inactive channel %s", channel_id)
+            return
+
+        call_data["current_playback"] = playback_id
+        call_data["is_speaking"] = True
+        call_data["last_speak_started_at"] = int(time.time() * 1000)
+        
+        # ✅ КРИТИЧНО: Регистрируем событие старта воспроизведения для filler оптимизации
+        self.playback_events[playback_id] = {
+            'started': True,
+            'started_at': time.time(),
+            'channel_id': channel_id
+        }
+        logger.info(f"📝 HYBRID: Registered playback start: {playback_id[:8]}... for channel {channel_id}")
+
+        if bridge_id:
+            logger.info("Playback started on bridge %s for channel %s: %s", bridge_id, channel_id, playback_id)
+            await self._run_asterisk_cli(f"core show bridges like {bridge_id}", "playback-started-bridge")
+        else:
+            logger.info("Playback started for channel %s: %s", channel_id, playback_id)
+        await self._run_asterisk_cli(f"core show channel {channel_id}", "playback-started")
+
+        # if self.vad_enabled and self.vad_service:
+        #     await self.vad_service.stop_monitoring(channel_id)
+        #     logger.info("VAD monitoring stopped for %s (playback started)", channel_id)
+
+
     async def handle_playback_finished(self, event):
-        """Обрабатывает завершение воспроизведения - запускает запись пользователя"""
+        """Handle ARI playback_finished event and resume user recording."""
         playback = event.get('playback', {})
         playback_id = playback.get('id')
         target_uri = playback.get('target_uri', '')
-        
+
+        channel_id = None
+        bridge_id = None
         if target_uri.startswith('channel:'):
             channel_id = target_uri.replace('channel:', '')
-            if channel_id in self.active_calls:
-                call_data = self.active_calls[channel_id]
-                call_data["is_speaking"] = False
-                call_data["current_playback"] = None
-                logger.info(f"🔇 Завершение воспроизведения для {channel_id}: {playback_id}")
-                
-                # 🎯 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем, не записывается ли уже
-                if call_data.get("is_recording", False):
-                    logger.info(f"⚠️ Запись уже активна для канала {channel_id}, пропускаем запуск новой записи")
-                    return
-                
-                # После завершения воспроизведения запускаем запись пользователя
-                # Звонок завершится только по таймауту (30 сек) или при разрыве соединения
-                await self.start_user_recording(channel_id)
-    
+        elif target_uri.startswith('bridge:'):
+            bridge_id = target_uri.replace('bridge:', '')
+            channel_id = self.bridge_to_channel.get(bridge_id)
+
+        if not channel_id:
+            logger.debug("PlaybackFinished for unknown target %s", target_uri)
+            return
+
+        call_data = self.active_calls.get(channel_id)
+        if not call_data:
+            logger.debug("PlaybackFinished for inactive channel %s", channel_id)
+            return
+
+        call_data["is_speaking"] = False
+        call_data["current_playback"] = None
+
+        if bridge_id:
+            logger.info("Playback finished on bridge %s for channel %s: %s", bridge_id, channel_id, playback_id)
+            await self._run_asterisk_cli(f"core show bridges like {bridge_id}", "playback-finished-bridge")
+        else:
+            logger.info("Playback finished for channel %s: %s", channel_id, playback_id)
+        await self._run_asterisk_cli(f"core show channel {channel_id}", "playback-finished")
+
+        if call_data.get("is_recording", False):
+            logger.info("Recording already in progress for %s, skip restart", channel_id)
+            return
+
+        # ✅ КРИТИЧНО: Проверяем АКТИВНЫЕ TTS ЗАДАЧИ + ОЧЕРЕДЬ перед запуском VAD
+        # Проблема: chunk может быть в процессе генерации, но еще не в очереди!
+        if self.parallel_tts:
+            active_tts = len(self.parallel_tts.tts_tasks.get(channel_id, []))
+            queued_chunks = len(self.parallel_tts.playback_queues.get(channel_id, []))
+            
+            if active_tts > 0 or queued_chunks > 0:
+                logger.info(f"⏳ ParallelTTS активен: {active_tts} TTS tasks + {queued_chunks} queued, VAD НЕ запускаем")
+                return
+
+        # ТОЛЬКО ЕСЛИ НЕТ АКТИВНЫХ TTS И ОЧЕРЕДЬ ПУСТА - запускаем VAD
+        await self.start_user_recording(channel_id)
+
+
     async def start_user_recording(self, channel_id: str):
         """Запускает запись речи пользователя с умной детекцией окончания."""
         try:
@@ -1125,7 +1436,7 @@ class OptimizedAsteriskAIHandler:
                         else:
                             logger.warning(f"⚠️ Не удалось запустить VAD мониторинг для {channel_id}")
                     
-                    # Инициализируем детектор речи для умного режима (старый)
+                    # нициализируем детектор речи для умного режима (старый)
                     if self.smart_detection_enabled and self.speech_detector:
                         self.speech_detector.reset()
                         self.active_calls[channel_id]["speech_detection_start"] = time.time()
@@ -1147,7 +1458,7 @@ class OptimizedAsteriskAIHandler:
         
         logger.info(f"🎤 Запись завершена: {recording_name}")
         
-        # Ищем канал по имени записи
+        # щем канал по имени записи
         channel_id = None
         for cid, call_data in self.active_calls.items():
             if call_data.get("recording_filename") == recording_name:
@@ -1252,11 +1563,16 @@ async def main():
     # Запускаем оптимизированный обработчик
     handler = OptimizedAsteriskAIHandler()
     
-    # Инициализируем сервисы оптимизации
+    # нициализируем сервисы оптимизации
     await handler.initialize_optimization_services()
+    
+    # Очищаем висящие каналы перед запуском
+    await handler.cleanup_hanging_channels()
     
     # Запускаем основной цикл
     await handler.run()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# 111111111111111111

@@ -9,6 +9,8 @@ import grpc
 import asyncio
 import time
 import logging
+import wave
+import io
 from typing import Optional
 
 # Добавляем путь к gRPC файлам
@@ -74,6 +76,29 @@ class YandexGrpcTTS:
             logger.error(f"❌ gRPC TTS initialization failed: {e}")
             raise
     
+    def _create_wav_from_pcm(self, pcm_data: bytes, sample_rate: int = 8000, channels: int = 1, sample_width: int = 2) -> bytes:
+        """
+        Создание WAV файла из raw PCM данных
+        
+        Args:
+            pcm_data: Raw PCM данные (LINEAR16_PCM)
+            sample_rate: Частота дискретизации (8000 для Asterisk)
+            channels: Количество каналов (1 = моно)
+            sample_width: Ширина сэмпла в байтах (2 = 16 бит)
+        
+        Returns:
+            bytes: WAV файл с заголовками
+        """
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(sample_width)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_data)
+        
+        wav_buffer.seek(0)
+        return wav_buffer.read()
+    
     def _get_fresh_iam_token(self) -> str:
         """Получение свежего IAM токена с кешированием"""
         import requests
@@ -116,17 +141,19 @@ class YandexGrpcTTS:
                 ('x-folder-id', self.folder_id)
             ]
             
-            # Запрос с оптимизацией для скорости
+            # Запрос с оптимизацией для скорости и ПРАВИЛЬНЫМ форматом для Asterisk
             request = tts_pb2.UtteranceSynthesisRequest(
                 text=text,
                 output_audio_spec=tts_pb2.AudioFormatOptions(
-                    container_audio=tts_pb2.ContainerAudio(
-                        container_audio_type=tts_pb2.ContainerAudio.ContainerAudioType.WAV
+                    # ✅ ИСПРАВЛЕНО: RawAudio с LINEAR16_PCM 8000Hz для Asterisk
+                    raw_audio=tts_pb2.RawAudio(
+                        audio_encoding=tts_pb2.RawAudio.AudioEncoding.LINEAR16_PCM,
+                        sample_rate_hertz=8000  # КРИТИЧНО: 8kHz для телефонии
                     )
                 ),
                 # КРИТИЧНО: настройки для минимальной латентности
                 hints=[
-                    tts_pb2.Hints(voice="alena"),      # Быстрый голос (не "jane")
+                    tts_pb2.Hints(voice="jane"),      # ✅ ИСПРАВЛЕНО: Унифицировали с приветствием
                     tts_pb2.Hints(speed=1.15),         # Немного ускорить
                     tts_pb2.Hints(role="neutral")      # Нейтральная эмоция
                 ],
@@ -136,17 +163,20 @@ class YandexGrpcTTS:
             # Потоковый вызов
             response_stream = self.stub.UtteranceSynthesis(request, metadata=metadata)
             
-            # Собираем аудио чанки
-            audio_chunks = []
+            # Собираем raw PCM чанки
+            pcm_chunks = []
             async for response in response_stream:
                 if response.audio_chunk.data:
-                    audio_chunks.append(response.audio_chunk.data)
+                    pcm_chunks.append(response.audio_chunk.data)
             
-            # Объединяем в финальный аудио
-            audio_data = b''.join(audio_chunks)
+            # Объединяем raw PCM данные
+            raw_pcm = b''.join(pcm_chunks)
+            
+            # ✅ КРИТИЧНО: Конвертируем raw PCM в WAV для Asterisk
+            audio_data = self._create_wav_from_pcm(raw_pcm, sample_rate=8000, channels=1, sample_width=2)
             
             elapsed = time.time() - start_time
-            logger.info(f"⚡ gRPC TTS: {elapsed:.2f}s for '{text[:30]}...'")
+            logger.info(f"⚡ gRPC TTS (8kHz WAV): {elapsed:.2f}s for '{text[:30]}...', size={len(audio_data)} bytes")
             
             # Алерт при превышении целевого времени
             if elapsed > 0.25:

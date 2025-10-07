@@ -45,10 +45,9 @@ class AsteriskARIClient:
             sound_id: Имя звукового файла (без расширения)
             lang: Язык (папка в sounds/)
         """
-        # 🎯 ЭТАП 2.3: Проверка существования канала перед воспроизведением
-        if not await self.channel_exists(channel_id):
-            logger.warning(f"⚠️ Канал {channel_id} не существует, пропускаем воспроизведение")
-            return None
+        # ✅ ИСПРАВЛЕНО: НЕ проверяем channel_exists() здесь!
+        # Причина: ARI возвращает False когда канал занят (VAD recording)
+        # Пусть ARI сам вернет ошибку, если канал действительно не существует
             
         try:
             url = f"{self.base_url}/channels/{channel_id}/play"
@@ -75,6 +74,11 @@ class AsteriskARIClient:
                         return True  # Возвращаем True если статус OK
                 else:
                     logger.error(f"❌ Ошибка проигрывания: {response.status} - {response_text}")
+                    logger.warning(
+                        "ARI play_sound: status=%s body=%s",
+                        response.status,
+                        await response.text()
+                    )
                     return None
                     
         except Exception as e:
@@ -183,6 +187,20 @@ class AsteriskARIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка завершения звонка: {e}")
             return False
+    
+    async def get_channels(self):
+        """Получает список всех активных каналов."""
+        try:
+            url = f"{self.base_url}/channels"
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logger.warning(f"⚠️ Не удалось получить список каналов: {response.status}")
+                    return []
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка каналов: {e}")
+            return []
     
     async def channel_exists(self, channel_id):
         """Проверяет, существует ли канал в Asterisk."""
